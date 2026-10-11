@@ -5,14 +5,18 @@
 """
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import Enum
 
 KRW_UNIT = Decimal("1")
-USD_UNIT = Decimal("0.01")
-FX_UNIT = Decimal("0.0001")
+# 달러 가격은 센트(0.01)가 아니라 0.0001 단위로 둔다. 센트로 반올림하면 0.005달러 미만 종목이
+# 0원에 체결되거나, 매수·매도 반올림 방향 차이로 차익이 생긴다.
+USD_PRICE_UNIT = Decimal("0.0001")
+FX_UNIT = Decimal("0.01")
+MAX_NAME_LENGTH = 100
 
 # 한 번에 주문할 수 있는 최대 수량. 비정상적으로 큰 입력이 계산을 망가뜨리지 않게 막는다.
 MAX_ORDER_QUANTITY = 1_000_000
@@ -33,12 +37,31 @@ class TradingError(Exception):
 
 
 def to_decimal(value: float | int | str | Decimal) -> Decimal:
-    """외부 값(yfinance float 등)을 Decimal로 바꾼다. float는 문자열을 거쳐 이진 오차를 없앤다."""
-    if isinstance(value, Decimal):
-        return value
-    if isinstance(value, float):
-        return Decimal(repr(value))
-    return Decimal(value)
+    """외부 값(yfinance float 등)을 Decimal로 바꾼다. float는 문자열을 거쳐 이진 오차를 없앤다.
+
+    NaN·Infinity는 장부에 한 번 들어가면 이후 모든 계산을 망가뜨리므로 여기서 막는다.
+    """
+    try:
+        if isinstance(value, bool):
+            raise TypeError
+        if isinstance(value, Decimal):
+            result = value
+        elif isinstance(value, float):
+            result = Decimal(repr(value))
+        else:
+            result = Decimal(value)
+    except (InvalidOperation, TypeError, ValueError):
+        raise TradingError(f"숫자가 아닌 값입니다: {value!r}") from None
+    if not result.is_finite():
+        raise TradingError(f"올바르지 않은 숫자입니다: {value!r}")
+    return result
+
+
+def positive_decimal(value: float | int | str | Decimal, what: str) -> Decimal:
+    result = to_decimal(value)
+    if result <= 0:
+        raise TradingError(f"{what} 값이 올바르지 않습니다: {value!r}")
+    return result
 
 
 def krw(value: Decimal) -> Decimal:
@@ -51,9 +74,28 @@ def krw_floor(value: Decimal) -> Decimal:
     return value.quantize(KRW_UNIT, rounding=ROUND_DOWN)
 
 
-def price_in(currency: Currency, value: Decimal) -> Decimal:
-    unit = KRW_UNIT if currency is Currency.KRW else USD_UNIT
-    return value.quantize(unit, rounding=ROUND_HALF_UP)
+def normalize_price(currency: Currency, value: Decimal) -> Decimal:
+    """시세를 통화별 단위로 맞춘다. 체결과 평가가 같은 가격을 쓰도록 시세를 받을 때 한 번만 적용한다."""
+    unit = KRW_UNIT if currency is Currency.KRW else USD_PRICE_UNIT
+    price = value.quantize(unit, rounding=ROUND_HALF_UP)
+    if price <= 0:
+        raise TradingError("가격이 너무 낮아 거래할 수 없는 종목입니다.")
+    return price
+
+
+def normalize_fx(value: Decimal) -> Decimal:
+    rate = value.quantize(FX_UNIT, rounding=ROUND_HALF_UP)
+    if rate <= 0:
+        raise TradingError("환율 값이 올바르지 않습니다.")
+    return rate
+
+
+def clean_name(value: object, fallback: str) -> str:
+    """외부에서 받은 종목명: 문자열만, 제어문자 제거, 길이 제한."""
+    if not isinstance(value, str):
+        return fallback
+    text = "".join(ch for ch in value if unicodedata.category(ch)[0] != "C").strip()
+    return text[:MAX_NAME_LENGTH] or fallback
 
 
 @dataclass(frozen=True)

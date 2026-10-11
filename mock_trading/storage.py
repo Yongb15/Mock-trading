@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Iterator
 
-from .domain import Currency, Holding, Side, Trade, krw
+from .domain import Currency, Holding, Side, Trade, TradingError, krw, to_decimal
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account (
@@ -35,6 +36,24 @@ CREATE TABLE IF NOT EXISTS trades (
     fee_krw      TEXT    NOT NULL
 );
 """
+
+
+class LedgerError(Exception):
+    """DB에 저장된 장부가 손상되어 계산할 수 없음. 계좌 초기화로 복구한다."""
+
+
+@dataclass(frozen=True)
+class Ledger:
+    cash: Decimal
+    holdings: dict[str, Holding]
+    realized_profit: Decimal
+
+
+def _stored_decimal(value: str, what: str) -> Decimal:
+    try:
+        return to_decimal(value)
+    except TradingError:
+        raise LedgerError(f"장부의 {what} 값이 손상되었습니다: {value!r}") from None
 
 
 def default_db_path() -> Path:
@@ -74,7 +93,7 @@ class Repository:
         row = self._conn.execute("SELECT initial_cash FROM account WHERE id = 1").fetchone()
         if row is None:
             raise LookupError("계좌가 아직 없습니다.")
-        return Decimal(row["initial_cash"])
+        return _stored_decimal(row["initial_cash"], "기초 자금")
 
     def reset_account(self, initial_cash: Decimal) -> None:
         """기초 자금을 새로 받고 거래 내역을 모두 지운다."""
@@ -101,6 +120,13 @@ class Repository:
         fee_krw: Decimal,
         executed_at: datetime | None = None,
     ) -> Trade:
+        # 마지막 방어선: 장부에는 유한한 값만, 금액은 양수만 들어간다.
+        if not all(isinstance(v, Decimal) and v.is_finite() for v in (price, fx_rate, amount_krw, fee_krw)):
+            raise TradingError("금액에 올바르지 않은 숫자가 있어 기록하지 않았습니다.")
+        if price <= 0 or fx_rate <= 0 or amount_krw <= 0 or fee_krw < 0:
+            raise TradingError("금액이 0 이하라 기록하지 않았습니다.")
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise TradingError("수량이 올바르지 않아 기록하지 않았습니다.")
         executed_at = executed_at or datetime.now()
         cursor = self._conn.execute(
             """
@@ -145,38 +171,39 @@ class Repository:
                 name=row["name"],
                 side=Side(row["side"]),
                 quantity=row["quantity"],
-                price=Decimal(row["price"]),
+                price=_stored_decimal(row["price"], "체결가"),
                 currency=Currency(row["currency"]),
-                fx_rate=Decimal(row["fx_rate"]),
-                amount_krw=Decimal(row["amount_krw"]),
-                fee_krw=Decimal(row["fee_krw"]),
+                fx_rate=_stored_decimal(row["fx_rate"], "환율"),
+                amount_krw=_stored_decimal(row["amount_krw"], "체결 금액"),
+                fee_krw=_stored_decimal(row["fee_krw"], "수수료"),
             )
             for row in rows
         ]
 
     # ---- 장부에서 계산하는 값 ----
-    def cash(self) -> Decimal:
-        cash = self.initial_cash()
-        for trade in self.trades():
-            if trade.side is Side.BUY:
-                cash -= trade.amount_krw + trade.fee_krw
-            else:
-                cash += trade.amount_krw - trade.fee_krw
-        return cash
+    def ledger(self) -> Ledger:
+        """장부를 처음부터 한 번 훑어 현금·보유 종목·실현 손익을 함께 계산한다.
 
-    def holdings(self) -> dict[str, Holding]:
-        """이동평균법: 매도하면 남은 원가를 매도 수량 비율만큼 줄인다."""
+        이동평균법: 매도하면 남은 원가를 매도 수량 비율만큼 줄이고, 줄어든 원가와 매도 대금의 차이가 실현 손익이다.
+        """
+        cash = self.initial_cash()
+        realized = Decimal(0)
         holdings: dict[str, Holding] = {}
         for trade in self.trades():
             current = holdings.get(trade.symbol)
+            held_quantity = current.quantity if current else 0
+            held_cost = current.cost_krw if current else Decimal(0)
             if trade.side is Side.BUY:
-                quantity = (current.quantity if current else 0) + trade.quantity
-                cost = (current.cost_krw if current else Decimal(0)) + trade.amount_krw + trade.fee_krw
+                cash -= trade.amount_krw + trade.fee_krw
+                quantity = held_quantity + trade.quantity
+                cost = held_cost + trade.amount_krw + trade.fee_krw
             else:
-                if current is None or current.quantity < trade.quantity:
-                    raise ValueError(f"장부가 손상되었습니다: {trade.symbol} 보유 수량보다 많이 매도됨")
-                quantity = current.quantity - trade.quantity
-                cost = krw(current.cost_krw * quantity / current.quantity)
+                if trade.quantity > held_quantity:
+                    raise LedgerError(f"거래 #{trade.id}: {trade.symbol}을 보유 수량보다 많이 매도한 기록이 있습니다.")
+                cash += trade.amount_krw - trade.fee_krw
+                quantity = held_quantity - trade.quantity
+                cost = krw(held_cost * quantity / held_quantity)
+                realized += trade.amount_krw - trade.fee_krw - (held_cost - cost)
             if quantity == 0:
                 holdings.pop(trade.symbol, None)
             else:
@@ -187,20 +214,13 @@ class Repository:
                     quantity=quantity,
                     cost_krw=cost,
                 )
-        return holdings
+        return Ledger(cash=cash, holdings=holdings, realized_profit=realized)
+
+    def cash(self) -> Decimal:
+        return self.ledger().cash
+
+    def holdings(self) -> dict[str, Holding]:
+        return self.ledger().holdings
 
     def realized_profit(self) -> Decimal:
-        """매도로 확정된 손익 합계 (수수료 반영)."""
-        held: dict[str, tuple[int, Decimal]] = {}
-        realized = Decimal(0)
-        for trade in self.trades():
-            quantity, cost = held.get(trade.symbol, (0, Decimal(0)))
-            if trade.side is Side.BUY:
-                held[trade.symbol] = (quantity + trade.quantity, cost + trade.amount_krw + trade.fee_krw)
-            else:
-                remaining = quantity - trade.quantity
-                remaining_cost = krw(cost * remaining / quantity)
-                sold_cost = cost - remaining_cost
-                realized += trade.amount_krw - trade.fee_krw - sold_cost
-                held[trade.symbol] = (remaining, remaining_cost)
-        return realized
+        return self.ledger().realized_profit
