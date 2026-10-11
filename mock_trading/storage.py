@@ -114,6 +114,16 @@ class Repository:
             raise LookupError("계좌가 아직 없습니다.")
         return _stored_decimal(row["initial_cash"], "기초 자금")
 
+    def hold_for_exit(self, timeout: float) -> bool:
+        """종료 직전에만 쓴다: 진행 중인 트랜잭션이 끝날 때까지 기다린 뒤 잠금을 잡고 놓지 않는다."""
+        return self._lock.acquire(timeout=timeout)
+
+    @_locked
+    def account_generation(self) -> str | None:
+        """계좌를 초기화할 때마다 바뀌는 값. 주문이 시작된 계좌와 기록할 계좌가 같은지 확인하는 데 쓴다."""
+        row = self._conn.execute("SELECT created_at FROM account WHERE id = 1").fetchone()
+        return row["created_at"] if row else None
+
     @_locked
     def reset_account(self, initial_cash: Decimal) -> None:
         """기초 자금을 새로 받고 거래 내역을 모두 지운다."""
@@ -122,10 +132,12 @@ class Repository:
             self._conn.execute("DELETE FROM account")
             self._conn.execute(
                 "INSERT INTO account (id, initial_cash, created_at) VALUES (1, ?, ?)",
-                (str(initial_cash), datetime.now().isoformat(timespec="seconds")),
+                # 마이크로초까지 저장해 같은 초에 두 번 초기화해도 세대가 구분된다.
+                (str(initial_cash), datetime.now().isoformat(timespec="microseconds")),
             )
 
     # ---- 거래 장부 ----
+    @_locked
     def add_trade(
         self,
         *,

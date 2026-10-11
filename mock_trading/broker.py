@@ -24,9 +24,12 @@ from .storage import Repository
 MIN_INITIAL_CASH = Decimal("100000")
 MAX_INITIAL_CASH = Decimal("100000000000")  # 1000억
 
-# 전일 종가 대비 이 배수를 벗어나는 시세는 데이터 오류로 보고 주문을 막는다.
-# 국내 주식은 하루 가격제한폭이 ±30%라 여유를 조금 둔 1.35배, 미국 주식은 제한이 없어 3배.
-SUSPICIOUS_PRICE_RATIO = {Currency.KRW: Decimal("1.35"), Currency.USD: Decimal(3)}
+# 전일 종가 대비 (하한, 상한) 배수. 벗어나는 시세는 데이터 오류로 보고 주문을 막는다.
+# 국내 주식은 하루 가격제한폭이 ±30%라 여유를 둔 0.65~1.35배, 미국 주식은 제한이 없어 1/3~3배.
+PRICE_BAND = {
+    Currency.KRW: (Decimal("0.65"), Decimal("1.35")),
+    Currency.USD: (Decimal(1) / 3, Decimal(3)),
+}
 
 # 원/달러 환율이 이 범위를 벗어나면 데이터 오류로 본다.
 USD_KRW_MIN = Decimal(500)
@@ -111,33 +114,56 @@ class Broker:
         quote = self.provider.get_quote(normalize_symbol(symbol))
         price = normalize_price(quote.currency, positive_decimal(quote.price, "현재가"))
         if quote.previous_close is None:
-            raise TradingError("전일 종가를 확인할 수 없어 주문을 막았습니다. 잠시 후 다시 시도하세요.")
+            raise TradingError(
+                "전일 종가를 확인할 수 없어 시세가 정상인지 판단할 수 없습니다. "
+                "매수·매도 모두 잠시 후 다시 시도하세요."
+            )
         previous = normalize_price(quote.currency, positive_decimal(quote.previous_close, "전일 종가"))
-        ratio = SUSPICIOUS_PRICE_RATIO[quote.currency]
-        if price > previous * ratio or price * ratio < previous:
+        low, high = PRICE_BAND[quote.currency]
+        if not previous * low <= price <= previous * high:
             raise TradingError("시세가 비정상적으로 크게 변해 주문을 막았습니다. 잠시 후 다시 시도하세요.")
         return Quote(quote.symbol, quote.name, price, quote.currency, previous)
 
     # ---- 주문 ----
-    def buy(self, symbol: str, quantity: int, expected_price: Decimal | None = None) -> Trade:
-        return self._execute(Side.BUY, symbol, quantity, expected_price)
+    def buy(
+        self, symbol: str, quantity: int, expected_price: Decimal | None = None, expected_fx: Decimal | None = None
+    ) -> Trade:
+        return self._execute(Side.BUY, symbol, quantity, expected_price, expected_fx)
 
-    def sell(self, symbol: str, quantity: int, expected_price: Decimal | None = None) -> Trade:
-        return self._execute(Side.SELL, symbol, quantity, expected_price)
+    def sell(
+        self, symbol: str, quantity: int, expected_price: Decimal | None = None, expected_fx: Decimal | None = None
+    ) -> Trade:
+        return self._execute(Side.SELL, symbol, quantity, expected_price, expected_fx)
 
-    def _execute(self, side: Side, symbol: str, quantity: int, expected_price: Decimal | None = None) -> Trade:
-        """expected_price: 사용자가 확인창에서 본 가격. 체결 가격이 이와 크게 다르면 체결하지 않는다."""
+    @staticmethod
+    def _check_slippage(actual: Decimal, expected: Decimal | None, what: str) -> None:
+        if expected is None:
+            return
+        expected = positive_decimal(expected, f"확인한 {what}")
+        if abs(actual - expected) / expected * 100 > PRICE_SLIPPAGE_LIMIT:
+            raise TradingError(
+                f"확인한 뒤 {what}이 {PRICE_SLIPPAGE_LIMIT}% 넘게 변했습니다. 새 값을 확인하고 다시 주문하세요."
+            )
+
+    def _execute(
+        self,
+        side: Side,
+        symbol: str,
+        quantity: int,
+        expected_price: Decimal | None = None,
+        expected_fx: Decimal | None = None,
+    ) -> Trade:
+        """expected_price·expected_fx: 사용자가 확인창에서 본 가격과 환율. 체결 값이 크게 다르면 체결하지 않는다."""
         self._validate_quantity(quantity)
         self._require_account()
+        # 네트워크 조회 중에 계좌가 초기화되면, 이전 계좌에서 낸 주문을 새 계좌에 기록하지 않는다.
+        generation = self.repo.account_generation()
         try:
             quote = self._checked_quote(symbol)
-            if expected_price is not None:
-                expected = positive_decimal(expected_price, "확인한 가격")
-                if abs(quote.price - expected) / expected * 100 > PRICE_SLIPPAGE_LIMIT:
-                    raise TradingError(
-                        f"확인한 뒤 가격이 {PRICE_SLIPPAGE_LIMIT}% 넘게 변했습니다. 새 가격을 확인하고 다시 주문하세요."
-                    )
+            self._check_slippage(quote.price, expected_price, "가격")
             fx_rate = self.fx_rate_for(quote.currency)
+            if quote.currency is not Currency.KRW:
+                self._check_slippage(fx_rate, expected_fx, "환율")
             amount = krw(quote.price * fx_rate * quantity)
             fee = self.fees.fee(side, quote.currency, amount)
         except InvalidOperation:
@@ -147,6 +173,8 @@ class Broker:
 
         # 확인과 기록을 한 트랜잭션에서: 그 사이에 다른 주문이 끼어들 수 없다.
         with self.repo.transaction():
+            if self.repo.account_generation() != generation:
+                raise TradingError("주문을 처리하는 동안 계좌가 초기화되어 주문을 취소했습니다.")
             ledger = self.repo.ledger()
             if side is Side.BUY:
                 if amount + fee > ledger.cash:

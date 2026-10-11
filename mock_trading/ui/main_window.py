@@ -238,38 +238,49 @@ class MainWindow(QMainWindow):
         """
         if not self.broker.repo.has_account():
             self.show()
-            if not self._ask_initial_cash(first_time=True):
+            if not self._ask_initial_cash():
                 return False
         self.refresh_all()
         self.timer.start(AUTO_REFRESH_MS)
         return True
 
-    def _ask_initial_cash(self, *, first_time: bool) -> bool:
-        title = "기초 자금 받기" if first_time else "계좌 초기화"
-        text = "연습에 쓸 가상 기초 자금(원)을 입력하세요." if first_time else "새 기초 자금(원). 기존 거래 내역은 모두 지워집니다."
+    def _ask_initial_cash(self) -> bool:
+        """첫 실행 전용. 아직 작업 스레드에 아무 작업도 없으므로 화면 스레드에서 바로 계좌를 만든다."""
+        title = "기초 자금 받기"
+        text = "연습에 쓸 가상 기초 자금(원)을 입력하세요."
         while True:
             # QInputDialog.getInt는 32비트 정수라 20억까지만 받는다. 연습용으로는 충분하다.
             amount, ok = QInputDialog.getInt(self, title, text, DEFAULT_INITIAL_CASH, 100_000, 2_000_000_000, 1_000_000)
             if not ok:
                 return False
             try:
-                # Repository가 잠금으로 직렬화하므로 작업 스레드가 돌고 있어도 안전하다.
                 self.broker.open_account(amount)
                 return True
             except Exception as error:
                 _warn(self, title, str(error))
 
     def reset_account(self) -> None:
+        if self._order_pending:
+            self.status.setText("주문을 처리하는 중에는 계좌를 초기화할 수 없습니다.")
+            return
         if not _confirm(self, "계좌 초기화", "보유 종목과 거래 내역이 모두 삭제됩니다. 계속할까요?"):
             return
-        self.timer.stop()
-        try:
-            if self._ask_initial_cash(first_time=False):
-                self.current = None
-                self._set_order_enabled(False)
-                self.refresh_all()
-        finally:
-            self.timer.start(AUTO_REFRESH_MS)
+        amount, ok = QInputDialog.getInt(
+            self, "계좌 초기화", "새 기초 자금(원). 기존 거래 내역은 모두 지워집니다.",
+            DEFAULT_INITIAL_CASH, 100_000, 2_000_000_000, 1_000_000,
+        )
+        if not ok:
+            return
+
+        # 초기화도 작업 스레드 대기열에 넣는다. 앞서 들어간 작업(시세 조회 등)이 모두 끝난 뒤 실행되고,
+        # 그 결과가 초기화 뒤에 화면을 이전 계좌 상태로 되돌리지 않도록 current를 초기화 완료 시점에 비운다.
+        def done(_: object) -> None:
+            self.current = None
+            self._set_order_enabled(False)
+            self.status.setText(f"계좌를 {fmt.won(Decimal(amount))}으로 초기화했습니다.")
+            self.refresh_all()
+
+        self.worker.run(lambda: self.broker.open_account(amount), done, lambda m: _warn(self, "계좌 초기화", m))
 
     # ------------------------------------------------------------------ 데이터 불러오기
     def refresh_all(self) -> None:
@@ -314,14 +325,15 @@ class MainWindow(QMainWindow):
             f"{quantity:,}주를 {fmt.price(quote.price, quote.currency)}에 {verb}할까요?\n\n"
             f"예상 금액: {fmt.won(amount)}\n"
             f"예상 수수료·세금: {fmt.won(fee)}\n"
-            f"가격이 {PRICE_SLIPPAGE_LIMIT}% 넘게 바뀌면 체결하지 않습니다."
+            + (f"적용 환율: {self.current.fx_rate:,}원/달러\n" if quote.currency.value == "USD" else "")
+            + f"가격이나 환율이 {PRICE_SLIPPAGE_LIMIT}% 넘게 바뀌면 체결하지 않습니다."
         )
         if not _confirm(self, f"{verb} 확인", message):
             return
         self._order_pending = True
         self._set_order_enabled(False)
         action = self.broker.buy if side is Side.BUY else self.broker.sell
-        expected_price = quote.price
+        expected_price, expected_fx = quote.price, self.current.fx_rate
 
         def done(trade: Trade) -> None:
             self._order_pending = False
@@ -337,7 +349,7 @@ class MainWindow(QMainWindow):
             _warn(self, f"{verb} 실패", message)
             self.refresh_all()
 
-        self.worker.run(lambda: action(quote.symbol, quantity, expected_price), done, failed)
+        self.worker.run(lambda: action(quote.symbol, quantity, expected_price, expected_fx), done, failed)
 
     def _estimate(self, side: Side) -> tuple[Decimal, Decimal]:
         """화면과 확인창에 보여줄 원화 금액과 수수료. 실제 체결과 같은 규칙(broker.fees)으로 계산한다."""
