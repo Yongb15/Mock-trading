@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from tests.helpers import AutoConfirmBroker
 from mock_trading.broker import Broker
 from mock_trading.domain import MAX_ORDER_QUANTITY, Currency, Quote, Side, TradingError, clean_name, to_decimal
 from mock_trading.market_data import normalize_symbol
@@ -21,7 +22,7 @@ def provider():
 def broker(provider):
     from mock_trading.broker import FeePolicy
 
-    b = Broker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
+    b = AutoConfirmBroker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
     b.open_account(10_000_000)
     return b
 
@@ -33,7 +34,7 @@ def _set_price(provider, symbol, price, currency=Currency.KRW, previous="same"):
 
 def test_max_buy_finds_the_last_affordable_share(provider):
     """QA#1: 1001원 주식, 현금 100,115원 → 100주(100,100 + 수수료 15)까지 살 수 있다."""
-    broker = Broker(Repository(), provider)  # 기본 수수료 0.015%
+    broker = AutoConfirmBroker(Repository(), provider)  # 기본 수수료 0.015%
     broker.repo.reset_account(Decimal("100115"))
     _set_price(provider, "005930.KS", "1001")
     assert broker.max_buy_quantity(provider.get_quote("005930.KS")) == 100
@@ -42,7 +43,7 @@ def test_max_buy_finds_the_last_affordable_share(provider):
 
 
 def test_default_fee_policy(provider):
-    broker = Broker(Repository(), provider)
+    broker = AutoConfirmBroker(Repository(), provider)
     broker.open_account(10_000_000)
     assert broker.buy("005930", 10).fee_krw == Decimal("105")    # 700,000 * 0.015%
     assert broker.sell("005930", 10).fee_krw == Decimal("1505")  # 700,000 * (0.015% + 0.20%)
@@ -101,14 +102,14 @@ def test_fx_is_stored_rounded(broker, provider):
 def test_initial_cash_is_stored_as_plain_integer(raw):
     """QA#3"""
     repo = Repository()
-    Broker(repo, FakeProvider()).open_account(raw)
+    AutoConfirmBroker(repo, FakeProvider()).open_account(raw)
     assert str(repo.initial_cash()) == "100000"
     assert f"{repo.cash():,}" == "100,000"
 
 
 def test_orders_without_account_raise_trading_error(provider):
     """QA#4"""
-    broker = Broker(Repository(), provider)
+    broker = AutoConfirmBroker(Repository(), provider)
     with pytest.raises(TradingError, match="계좌"):
         broker.buy("005930", 1)
     with pytest.raises(TradingError, match="계좌"):
@@ -163,7 +164,7 @@ def test_ledger_invariant(broker, provider):
 
 
 def test_quantity_boundary(provider):
-    broker = Broker(Repository(), provider)
+    broker = AutoConfirmBroker(Repository(), provider)
     broker.open_account(100_000_000_000)
     _set_price(provider, "005930.KS", "100")
     broker.buy("005930", MAX_ORDER_QUANTITY)
@@ -173,7 +174,7 @@ def test_quantity_boundary(provider):
 
 def test_file_db_persists_and_rolls_back(tmp_path, provider):
     path = tmp_path / "ledger.db"
-    broker = Broker(Repository(path), provider)
+    broker = AutoConfirmBroker(Repository(path), provider)
     broker.open_account(10_000_000)
     broker.buy("005930", 2)
     with pytest.raises(RuntimeError):

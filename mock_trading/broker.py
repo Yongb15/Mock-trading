@@ -125,20 +125,17 @@ class Broker:
         return Quote(quote.symbol, quote.name, price, quote.currency, previous)
 
     # ---- 주문 ----
-    def buy(
-        self, symbol: str, quantity: int, expected_price: Decimal | None = None, expected_fx: Decimal | None = None
-    ) -> Trade:
+    def buy(self, symbol: str, quantity: int, *, expected_price: Decimal, expected_fx: Decimal | None = None) -> Trade:
         return self._execute(Side.BUY, symbol, quantity, expected_price, expected_fx)
 
-    def sell(
-        self, symbol: str, quantity: int, expected_price: Decimal | None = None, expected_fx: Decimal | None = None
-    ) -> Trade:
+    def sell(self, symbol: str, quantity: int, *, expected_price: Decimal, expected_fx: Decimal | None = None) -> Trade:
         return self._execute(Side.SELL, symbol, quantity, expected_price, expected_fx)
 
     @staticmethod
     def _check_slippage(actual: Decimal, expected: Decimal | None, what: str) -> None:
+        # 확인 값이 없으면 검사를 건너뛰지 않고 주문을 막는다(fail-closed).
         if expected is None:
-            return
+            raise TradingError(f"주문 전에 확인한 {what}이 없어 주문할 수 없습니다.")
         expected = positive_decimal(expected, f"확인한 {what}")
         if abs(actual - expected) / expected * 100 > PRICE_SLIPPAGE_LIMIT:
             raise TradingError(
@@ -150,10 +147,11 @@ class Broker:
         side: Side,
         symbol: str,
         quantity: int,
-        expected_price: Decimal | None = None,
-        expected_fx: Decimal | None = None,
+        expected_price: Decimal | None,
+        expected_fx: Decimal | None,
     ) -> Trade:
-        """expected_price·expected_fx: 사용자가 확인창에서 본 가격과 환율. 체결 값이 크게 다르면 체결하지 않는다."""
+        """expected_price·expected_fx: 사용자가 확인창에서 본 가격과 환율(원화 종목은 환율 불필요).
+        없거나 체결 값과 크게 다르면 체결하지 않는다."""
         self._validate_quantity(quantity)
         self._require_account()
         # 네트워크 조회 중에 계좌가 초기화되면, 이전 계좌에서 낸 주문을 새 계좌에 기록하지 않는다.

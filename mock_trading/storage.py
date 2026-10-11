@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import uuid
 from functools import wraps
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,7 +23,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS account (
     id            INTEGER PRIMARY KEY CHECK (id = 1),
     initial_cash  TEXT NOT NULL,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    generation    TEXT
 );
 CREATE TABLE IF NOT EXISTS trades (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +84,14 @@ class Repository:
         self._conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=check_same_thread)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._lock = threading.RLock()
+
+    def _migrate(self) -> None:
+        """v0.1.0에서 만든 DB 파일에는 generation 칸이 없다. 없으면 추가한다(기존 계좌는 created_at으로 대신)."""
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(account)")}
+        if "generation" not in columns:
+            self._conn.execute("ALTER TABLE account ADD COLUMN generation TEXT")
 
     @_locked
     def close(self) -> None:
@@ -121,8 +130,10 @@ class Repository:
     @_locked
     def account_generation(self) -> str | None:
         """계좌를 초기화할 때마다 바뀌는 값. 주문이 시작된 계좌와 기록할 계좌가 같은지 확인하는 데 쓴다."""
-        row = self._conn.execute("SELECT created_at FROM account WHERE id = 1").fetchone()
-        return row["created_at"] if row else None
+        row = self._conn.execute("SELECT generation, created_at FROM account WHERE id = 1").fetchone()
+        if row is None:
+            return None
+        return row["generation"] or row["created_at"]
 
     @_locked
     def reset_account(self, initial_cash: Decimal) -> None:
@@ -131,9 +142,9 @@ class Repository:
             self._conn.execute("DELETE FROM trades")
             self._conn.execute("DELETE FROM account")
             self._conn.execute(
-                "INSERT INTO account (id, initial_cash, created_at) VALUES (1, ?, ?)",
-                # 마이크로초까지 저장해 같은 초에 두 번 초기화해도 세대가 구분된다.
-                (str(initial_cash), datetime.now().isoformat(timespec="microseconds")),
+                "INSERT INTO account (id, initial_cash, created_at, generation) VALUES (1, ?, ?, ?)",
+                # 세대는 시각이 아니라 무작위 값이라 아무리 빨리 초기화해도 겹치지 않는다.
+                (str(initial_cash), datetime.now().isoformat(timespec="seconds"), uuid.uuid4().hex),
             )
 
     # ---- 거래 장부 ----
