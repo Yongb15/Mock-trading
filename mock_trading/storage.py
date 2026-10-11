@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from functools import wraps
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,7 +30,7 @@ CREATE TABLE IF NOT EXISTS trades (
     symbol       TEXT    NOT NULL,
     name         TEXT    NOT NULL,
     side         TEXT    NOT NULL CHECK (side IN ('BUY', 'SELL')),
-    quantity     INTEGER NOT NULL CHECK (quantity > 0),
+    quantity     INTEGER NOT NULL CHECK (typeof(quantity) = 'integer' AND quantity > 0),
     price        TEXT    NOT NULL,
     currency     TEXT    NOT NULL CHECK (currency IN ('KRW', 'USD')),
     fx_rate      TEXT    NOT NULL,
@@ -60,7 +62,18 @@ def default_db_path() -> Path:
     return Path.home() / ".mock_trading" / "mock_trading.db"
 
 
+def _locked(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class Repository:
+    """SQLite 연결 하나를 감싼다. 모든 공개 메서드와 트랜잭션은 같은 RLock을 잡으므로
+    화면 스레드와 작업 스레드가 동시에 불러도 한 번에 하나씩만 실행된다."""
+
     def __init__(self, path: Path | str = ":memory:", *, check_same_thread: bool = True) -> None:
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -69,32 +82,39 @@ class Repository:
         self._conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=check_same_thread)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._lock = threading.RLock()
 
+    @_locked
     def close(self) -> None:
         self._conn.close()
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """잔고 확인과 거래 기록을 한 번에 처리한다. 중간에 실패하면 전부 되돌린다."""
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        else:
-            self._conn.execute("COMMIT")
+        """잔고 확인과 거래 기록을 한 번에 처리한다. 중간에 실패하면 전부 되돌린다.
+        트랜잭션이 끝날 때까지 잠금을 잡고 있어 다른 스레드의 쿼리가 끼어들지 못한다."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
 
     # ---- 계좌 ----
+    @_locked
     def has_account(self) -> bool:
         return self._conn.execute("SELECT 1 FROM account WHERE id = 1").fetchone() is not None
 
+    @_locked
     def initial_cash(self) -> Decimal:
         row = self._conn.execute("SELECT initial_cash FROM account WHERE id = 1").fetchone()
         if row is None:
             raise LookupError("계좌가 아직 없습니다.")
         return _stored_decimal(row["initial_cash"], "기초 자금")
 
+    @_locked
     def reset_account(self, initial_cash: Decimal) -> None:
         """기초 자금을 새로 받고 거래 내역을 모두 지운다."""
         with self.transaction():
@@ -161,10 +181,18 @@ class Repository:
             fee_krw=fee_krw,
         )
 
+    @_locked
     def trades(self) -> list[Trade]:
         rows = self._conn.execute("SELECT * FROM trades ORDER BY id").fetchall()
-        return [
-            Trade(
+        return [self._row_to_trade(row) for row in rows]
+
+    @staticmethod
+    def _row_to_trade(row: sqlite3.Row) -> Trade:
+        quantity = row["quantity"]
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise LedgerError(f"거래 #{row['id']}의 수량 값이 손상되었습니다: {quantity!r}")
+        try:
+            return Trade(
                 id=row["id"],
                 executed_at=datetime.fromisoformat(row["executed_at"]),
                 symbol=row["symbol"],
@@ -177,10 +205,11 @@ class Repository:
                 amount_krw=_stored_decimal(row["amount_krw"], "체결 금액"),
                 fee_krw=_stored_decimal(row["fee_krw"], "수수료"),
             )
-            for row in rows
-        ]
+        except (ValueError, TypeError) as error:
+            raise LedgerError(f"거래 #{row['id']}의 기록이 손상되었습니다: {error}") from None
 
     # ---- 장부에서 계산하는 값 ----
+    @_locked
     def ledger(self) -> Ledger:
         """장부를 처음부터 한 번 훑어 현금·보유 종목·실현 손익을 함께 계산한다.
 

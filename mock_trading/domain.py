@@ -143,13 +143,19 @@ class Holding:
 
 @dataclass(frozen=True)
 class Position:
-    """현재가를 반영한 보유 종목 평가."""
+    """현재가를 반영한 보유 종목 평가. 시세를 못 가져오면 quote가 None이고 원가로 평가한다."""
     holding: Holding
-    quote: Quote
-    fx_rate: Decimal
+    quote: Quote | None
+    fx_rate: Decimal | None
+
+    @property
+    def has_price(self) -> bool:
+        return self.quote is not None and self.fx_rate is not None
 
     @property
     def value_krw(self) -> Decimal:
+        if not self.has_price:
+            return self.holding.cost_krw
         return krw(self.quote.price * self.fx_rate * self.holding.quantity)
 
     @property

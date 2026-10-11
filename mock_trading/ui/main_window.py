@@ -28,13 +28,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..broker import AccountSummary, Broker
-from ..domain import MAX_ORDER_QUANTITY, Position, Quote, Side, Trade
+from ..broker import PRICE_SLIPPAGE_LIMIT, AccountSummary, Broker
+from ..domain import MAX_ORDER_QUANTITY, Position, Quote, Side, Trade, krw
 from ..market_data import PricePoint
 from . import format as fmt
 from .worker import Worker
 
 AUTO_REFRESH_MS = 60_000
+CLOSE_WAIT_MS = 3_000
 DEFAULT_INITIAL_CASH = 10_000_000
 
 
@@ -44,6 +45,7 @@ class _QuoteView:
     history: list[PricePoint]
     max_buy: int
     held: int
+    fx_rate: Decimal
 
 
 @dataclass
@@ -89,14 +91,14 @@ class MainWindow(QMainWindow):
         self.broker = broker
         self.worker = Worker()
         self.current: _QuoteView | None = None
+        self._order_pending = False
 
         self.setWindowTitle("모의투자")
         self.resize(1200, 780)
         self._build()
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh_all)
-        self.timer.start(AUTO_REFRESH_MS)
+        self.timer.timeout.connect(self.refresh_all)  # start()에서 계좌가 생긴 뒤 켠다
 
     # ------------------------------------------------------------------ 화면 구성
     def _build(self) -> None:
@@ -229,22 +231,29 @@ class MainWindow(QMainWindow):
         return table
 
     # ------------------------------------------------------------------ 시작 / 계좌
-    def start(self) -> None:
+    def start(self) -> bool:
+        """계좌가 없으면 기초 자금을 받는다. 취소하면 False → 호출한 쪽이 앱을 끝낸다.
+
+        자동 갱신 타이머는 계좌가 생긴 뒤에만 켠다(입력창이 떠 있는 동안 갱신 작업이 돌지 않게).
+        """
         if not self.broker.repo.has_account():
             self.show()
             if not self._ask_initial_cash(first_time=True):
-                self.close()
-                return
+                return False
         self.refresh_all()
+        self.timer.start(AUTO_REFRESH_MS)
+        return True
 
     def _ask_initial_cash(self, *, first_time: bool) -> bool:
         title = "기초 자금 받기" if first_time else "계좌 초기화"
         text = "연습에 쓸 가상 기초 자금(원)을 입력하세요." if first_time else "새 기초 자금(원). 기존 거래 내역은 모두 지워집니다."
         while True:
+            # QInputDialog.getInt는 32비트 정수라 20억까지만 받는다. 연습용으로는 충분하다.
             amount, ok = QInputDialog.getInt(self, title, text, DEFAULT_INITIAL_CASH, 100_000, 2_000_000_000, 1_000_000)
             if not ok:
                 return False
             try:
+                # Repository가 잠금으로 직렬화하므로 작업 스레드가 돌고 있어도 안전하다.
                 self.broker.open_account(amount)
                 return True
             except Exception as error:
@@ -253,9 +262,7 @@ class MainWindow(QMainWindow):
     def reset_account(self) -> None:
         if not _confirm(self, "계좌 초기화", "보유 종목과 거래 내역이 모두 삭제됩니다. 계속할까요?"):
             return
-        # 초기화는 화면 스레드에서 DB를 직접 쓰므로, 자동 갱신을 멈추고 진행 중인 작업이 끝난 뒤 실행한다.
         self.timer.stop()
-        self.worker.wait()
         try:
             if self._ask_initial_cash(first_time=False):
                 self.current = None
@@ -286,28 +293,38 @@ class MainWindow(QMainWindow):
         def job() -> _QuoteView:
             quote = self.broker.provider.get_quote(symbol)
             history = self.broker.provider.get_history(quote.symbol)
+            fx_rate = self.broker.fx_rate_for(quote.currency)
             held = self.broker.repo.holdings().get(quote.symbol)
-            return _QuoteView(quote, history, self.broker.max_buy_quantity(quote), held.quantity if held else 0)
+            return _QuoteView(
+                quote, history, self.broker.max_buy_quantity(quote), held.quantity if held else 0, fx_rate
+            )
 
         self.worker.run(job, self._show_quote, self._show_error)
 
     # ------------------------------------------------------------------ 주문
     def place_order(self, side: Side) -> None:
-        if not self.current:
+        if not self.current or self._order_pending:
             return
         quote = self.current.quote
         quantity = self.quantity.value()
         verb = "매수" if side is Side.BUY else "매도"
-        if not _confirm(
-            self,
-            f"{verb} 확인",
-            f"{quote.name} ({quote.symbol})\n{quantity:,}주를 현재가에 {verb}할까요?\n예상 금액: {self.estimate_label.text()}",
-        ):
+        amount, fee = self._estimate(side)
+        message = (
+            f"{quote.name} ({quote.symbol})\n"
+            f"{quantity:,}주를 {fmt.price(quote.price, quote.currency)}에 {verb}할까요?\n\n"
+            f"예상 금액: {fmt.won(amount)}\n"
+            f"예상 수수료·세금: {fmt.won(fee)}\n"
+            f"가격이 {PRICE_SLIPPAGE_LIMIT}% 넘게 바뀌면 체결하지 않습니다."
+        )
+        if not _confirm(self, f"{verb} 확인", message):
             return
+        self._order_pending = True
         self._set_order_enabled(False)
         action = self.broker.buy if side is Side.BUY else self.broker.sell
+        expected_price = quote.price
 
         def done(trade: Trade) -> None:
+            self._order_pending = False
             self.status.setText(
                 f"{verb} 체결: {trade.name} {trade.quantity:,}주 @ {fmt.price(trade.price, trade.currency)}"
                 f" (수수료 {fmt.won(trade.fee_krw)})"
@@ -315,26 +332,40 @@ class MainWindow(QMainWindow):
             self.refresh_all()
 
         def failed(message: str) -> None:
+            self._order_pending = False
             self._set_order_enabled(True)
             _warn(self, f"{verb} 실패", message)
+            self.refresh_all()
 
-        self.worker.run(lambda: action(quote.symbol, quantity), done, failed)
+        self.worker.run(lambda: action(quote.symbol, quantity, expected_price), done, failed)
+
+    def _estimate(self, side: Side) -> tuple[Decimal, Decimal]:
+        """화면과 확인창에 보여줄 원화 금액과 수수료. 실제 체결과 같은 규칙(broker.fees)으로 계산한다."""
+        view = self.current
+        amount = krw(view.quote.price * view.fx_rate * self.quantity.value())
+        return amount, self.broker.fees.fee(side, view.quote.currency, amount)
 
     def _fill_max(self) -> None:
-        if self.current:
-            self.quantity.setValue(max(1, self.current.max_buy))
+        if not self.current:
+            return
+        if self.current.max_buy == 0:
+            self.status.setText("현금이 부족해 1주도 살 수 없습니다.")
+            return
+        self.quantity.setValue(self.current.max_buy)
 
     def _update_estimate(self) -> None:
         if not self.current:
             self.estimate_label.setText("-")
             return
-        quote = self.current.quote
-        amount = quote.price * self.quantity.value()
-        self.estimate_label.setText(fmt.price(amount, quote.currency))
+        amount, fee = self._estimate(Side.BUY)
+        self.estimate_label.setText(f"{fmt.won(amount + fee)} (매수 수수료 포함)")
 
     def _set_order_enabled(self, enabled: bool) -> None:
-        self.buy_button.setEnabled(enabled)
-        self.sell_button.setEnabled(enabled)
+        """주문이 진행 중이면 다른 작업 결과가 먼저 도착해도 버튼을 켜지 않는다(중복 주문 방지)."""
+        view = self.current
+        enabled = enabled and view is not None and not self._order_pending
+        self.buy_button.setEnabled(enabled and view.max_buy > 0)
+        self.sell_button.setEnabled(enabled and view.held > 0)
 
     def _open_holding(self, row: int, _column: int) -> None:
         symbol = self.holdings_table.item(row, 1).text()
@@ -344,7 +375,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ 결과 표시
     def _show_error(self, message: str) -> None:
         self.status.setText(message)
-        self._set_order_enabled(self.current is not None)
+        self._set_order_enabled(True)
 
     def _show_quote(self, view: _QuoteView) -> None:
         self.current = view
@@ -401,16 +432,17 @@ class MainWindow(QMainWindow):
         self.holdings_table.setRowCount(len(view.positions))
         for row, position in enumerate(sorted(view.positions, key=lambda p: p.value_krw, reverse=True)):
             h, q = position.holding, position.quote
+            priced = position.has_price
             color = fmt.color_for(position.profit_krw)
             values = [
                 _item(h.name),
                 _item(h.symbol),
                 _item(f"{h.quantity:,}", align_right=True),
                 _item(fmt.won(h.avg_cost_krw), align_right=True),
-                _item(fmt.price(q.price, q.currency), align_right=True),
+                _item(fmt.price(q.price, q.currency) if priced else "시세 없음", align_right=True),
                 _item(fmt.won(position.value_krw), align_right=True),
-                _item(fmt.signed_won(position.profit_krw), align_right=True, color=color),
-                _item(fmt.percent(position.profit_rate), align_right=True, color=color),
+                _item(fmt.signed_won(position.profit_krw) if priced else "-", align_right=True, color=color),
+                _item(fmt.percent(position.profit_rate) if priced else "-", align_right=True, color=color),
             ]
             for column, item in enumerate(values):
                 self.holdings_table.setItem(row, column, item)
@@ -434,5 +466,5 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
         self.timer.stop()
-        self.worker.wait()
+        self.worker.wait(CLOSE_WAIT_MS)  # 네트워크가 끊겨도 닫기가 멈추지 않게
         super().closeEvent(event)

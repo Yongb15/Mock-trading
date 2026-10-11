@@ -80,7 +80,7 @@ def test_cannot_sell_more_than_held(broker):
 
 def test_sell_applies_kr_tax_and_realizes_profit(broker, provider):
     broker.buy("005930", 10)  # 비용 700,000 + 700
-    provider.quotes["005930.KS"] = Quote("005930.KS", "Samsung", Decimal("80000"), Currency.KRW)
+    provider.quotes["005930.KS"] = Quote("005930.KS", "Samsung", Decimal("80000"), Currency.KRW, Decimal("75000"))
     trade = broker.sell("005930", 4)
     assert trade.amount_krw == Decimal("320000")
     assert trade.fee_krw == Decimal("960")  # (0.1% + 0.2%) of 320,000

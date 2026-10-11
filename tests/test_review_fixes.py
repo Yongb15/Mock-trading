@@ -26,7 +26,8 @@ def broker(provider):
     return b
 
 
-def _set_price(provider, symbol, price, currency=Currency.KRW, previous=None):
+def _set_price(provider, symbol, price, currency=Currency.KRW, previous="same"):
+    previous = Decimal(price) if previous == "same" else previous  # 기본: 전일 종가 = 현재가
     provider.quotes[symbol] = Quote(symbol, symbol, Decimal(price), currency, previous)
 
 

@@ -61,5 +61,5 @@ class Worker:
         job.signals.failed.connect(lambda _: self._jobs.discard(job))
         self._pool.start(job)
 
-    def wait(self) -> None:
-        self._pool.waitForDone()
+    def wait(self, timeout_ms: int = -1) -> bool:
+        return self._pool.waitForDone(timeout_ms)

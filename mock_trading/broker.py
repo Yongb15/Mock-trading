@@ -25,8 +25,15 @@ MIN_INITIAL_CASH = Decimal("100000")
 MAX_INITIAL_CASH = Decimal("100000000000")  # 1000억
 
 # 전일 종가 대비 이 배수를 벗어나는 시세는 데이터 오류로 보고 주문을 막는다.
-# 국내 주식은 하루 ±30% 제한이 있고, 미국 주식도 하루에 3배 넘게 움직이는 일은 드물다.
-SUSPICIOUS_PRICE_RATIO = Decimal(3)
+# 국내 주식은 하루 가격제한폭이 ±30%라 여유를 조금 둔 1.35배, 미국 주식은 제한이 없어 3배.
+SUSPICIOUS_PRICE_RATIO = {Currency.KRW: Decimal("1.35"), Currency.USD: Decimal(3)}
+
+# 원/달러 환율이 이 범위를 벗어나면 데이터 오류로 본다.
+USD_KRW_MIN = Decimal(500)
+USD_KRW_MAX = Decimal(3000)
+
+# 확인창에서 본 가격과 체결 시 가격이 이만큼(%) 넘게 다르면 다시 확인하게 한다.
+PRICE_SLIPPAGE_LIMIT = Decimal(5)
 
 
 @dataclass(frozen=True)
@@ -91,30 +98,45 @@ class Broker:
     def fx_rate_for(self, currency: Currency) -> Decimal:
         if currency is Currency.KRW:
             return Decimal(1)
-        return normalize_fx(positive_decimal(self.provider.get_usd_krw(), "환율"))
+        rate = normalize_fx(positive_decimal(self.provider.get_usd_krw(), "환율"))
+        if not USD_KRW_MIN <= rate <= USD_KRW_MAX:
+            raise TradingError(f"환율이 비정상적입니다({rate:,}원). 잠시 후 다시 시도하세요.")
+        return rate
 
     def _checked_quote(self, symbol: str) -> Quote:
-        """provider가 무엇을 돌려주든 체결 전에 한 번 더 확인한다."""
+        """provider가 무엇을 돌려주든 체결 전에 한 번 더 확인한다.
+
+        전일 종가가 없으면 시세가 정상인지 판단할 기준이 없으므로 주문을 막는다(fail-closed).
+        """
         quote = self.provider.get_quote(normalize_symbol(symbol))
         price = normalize_price(quote.currency, positive_decimal(quote.price, "현재가"))
-        previous = quote.previous_close
-        if previous is not None and previous > 0:
-            if price > previous * SUSPICIOUS_PRICE_RATIO or price * SUSPICIOUS_PRICE_RATIO < previous:
-                raise TradingError("시세가 비정상적으로 크게 변해 주문을 막았습니다. 잠시 후 다시 시도하세요.")
+        if quote.previous_close is None:
+            raise TradingError("전일 종가를 확인할 수 없어 주문을 막았습니다. 잠시 후 다시 시도하세요.")
+        previous = normalize_price(quote.currency, positive_decimal(quote.previous_close, "전일 종가"))
+        ratio = SUSPICIOUS_PRICE_RATIO[quote.currency]
+        if price > previous * ratio or price * ratio < previous:
+            raise TradingError("시세가 비정상적으로 크게 변해 주문을 막았습니다. 잠시 후 다시 시도하세요.")
         return Quote(quote.symbol, quote.name, price, quote.currency, previous)
 
     # ---- 주문 ----
-    def buy(self, symbol: str, quantity: int) -> Trade:
-        return self._execute(Side.BUY, symbol, quantity)
+    def buy(self, symbol: str, quantity: int, expected_price: Decimal | None = None) -> Trade:
+        return self._execute(Side.BUY, symbol, quantity, expected_price)
 
-    def sell(self, symbol: str, quantity: int) -> Trade:
-        return self._execute(Side.SELL, symbol, quantity)
+    def sell(self, symbol: str, quantity: int, expected_price: Decimal | None = None) -> Trade:
+        return self._execute(Side.SELL, symbol, quantity, expected_price)
 
-    def _execute(self, side: Side, symbol: str, quantity: int) -> Trade:
+    def _execute(self, side: Side, symbol: str, quantity: int, expected_price: Decimal | None = None) -> Trade:
+        """expected_price: 사용자가 확인창에서 본 가격. 체결 가격이 이와 크게 다르면 체결하지 않는다."""
         self._validate_quantity(quantity)
         self._require_account()
         try:
             quote = self._checked_quote(symbol)
+            if expected_price is not None:
+                expected = positive_decimal(expected_price, "확인한 가격")
+                if abs(quote.price - expected) / expected * 100 > PRICE_SLIPPAGE_LIMIT:
+                    raise TradingError(
+                        f"확인한 뒤 가격이 {PRICE_SLIPPAGE_LIMIT}% 넘게 변했습니다. 새 가격을 확인하고 다시 주문하세요."
+                    )
             fx_rate = self.fx_rate_for(quote.currency)
             amount = krw(quote.price * fx_rate * quantity)
             fee = self.fees.fee(side, quote.currency, amount)
@@ -163,6 +185,8 @@ class Broker:
         """
         self._require_account()
         unit = quote.price * self.fx_rate_for(quote.currency)
+        if unit <= 0:  # 다른 provider가 0을 주더라도 0으로 나누지 않는다
+            return 0
         cash = self.repo.cash()
         quantity = min(int(cash / unit), MAX_ORDER_QUANTITY)
         while quantity > 0:
@@ -174,15 +198,23 @@ class Broker:
 
     # ---- 평가 ----
     def positions(self) -> list[Position]:
+        """보유 종목을 현재가로 평가한다. 한 종목의 시세가 실패해도 나머지와 계좌 화면은 계속 보여준다."""
+        self._require_account()
         holdings = self.repo.holdings()
-        if not holdings:
-            return []
-        usd_krw = self.fx_rate_for(Currency.USD) if any(h.currency is Currency.USD for h in holdings.values()) else None
+        usd_krw = None
+        if any(h.currency is Currency.USD for h in holdings.values()):
+            try:
+                usd_krw = self.fx_rate_for(Currency.USD)
+            except Exception:
+                usd_krw = None
         positions = []
         for holding in holdings.values():
-            quote = self.provider.get_quote(holding.symbol)
             fx_rate = Decimal(1) if holding.currency is Currency.KRW else usd_krw
-            positions.append(Position(holding=holding, quote=quote, fx_rate=fx_rate))
+            try:
+                quote = self.provider.get_quote(holding.symbol) if fx_rate is not None else None
+            except Exception:
+                quote = None  # 상장폐지·일시 오류: "시세 없음"으로 표시하고 원가로 평가
+            positions.append(Position(holding=holding, quote=quote if fx_rate else None, fx_rate=fx_rate))
         return positions
 
     def summary(self, positions: list[Position] | None = None) -> AccountSummary:
