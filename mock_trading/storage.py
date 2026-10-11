@@ -42,11 +42,12 @@ def default_db_path() -> Path:
 
 
 class Repository:
-    def __init__(self, path: Path | str = ":memory:") -> None:
+    def __init__(self, path: Path | str = ":memory:", *, check_same_thread: bool = True) -> None:
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         # isolation_level=None: 트랜잭션을 transaction()에서 직접 연다.
-        self._conn = sqlite3.connect(str(path), isolation_level=None)
+        # check_same_thread=False는 호출하는 쪽이 한 번에 한 스레드만 쓰도록 보장할 때만 쓴다(UI의 단일 작업 스레드).
+        self._conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=check_same_thread)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
 
