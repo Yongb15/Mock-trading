@@ -275,12 +275,17 @@ class MainWindow(QMainWindow):
 
         # 초기화도 작업 스레드 대기열에 넣는다. 앞서 들어간 작업(시세 조회 등)이 모두 끝난 뒤 실행되고,
         # 그 결과가 초기화 뒤에 화면을 이전 계좌 상태로 되돌리지 않도록 current를 초기화 완료 시점에 비운다.
+        symbol = self.current.quote.symbol if self.current else None
+
         def done(_: object) -> None:
             self._reset_pending = False
             self.current = None
             self._set_order_enabled(False)
             self.status.setText(f"계좌를 {fmt.won(Decimal(amount))}으로 초기화했습니다.")
             self.refresh_all()
+            if symbol:
+                # 시세 패널의 "보유 N주 / 최대 M주"가 이전 계좌 값으로 남지 않게 새 계좌 기준으로 다시 불러온다.
+                self.load_quote(symbol)
 
         def failed(message: str) -> None:
             self._reset_pending = False
