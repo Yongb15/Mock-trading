@@ -10,6 +10,7 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from ..domain import TradingError
+from ..storage import LedgerError
 
 
 class _Signals(QObject):
@@ -28,6 +29,8 @@ class _Job(QRunnable):
             result = self.fn()
         except TradingError as error:
             self.signals.failed.emit(str(error))
+        except LedgerError as error:
+            self.signals.failed.emit(f"{error} 계좌 초기화로 복구할 수 있습니다.")
         except Exception as error:  # 네트워크 오류 등: 사용자에게는 요약만 보여준다
             traceback.print_exc()
             self.signals.failed.emit(f"처리 중 오류가 발생했습니다: {type(error).__name__}")

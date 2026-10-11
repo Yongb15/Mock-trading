@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -52,6 +53,27 @@ class _PortfolioView:
     trades: list[Trade]
 
 
+def _plain_label(text: str) -> QLabel:
+    """종목명처럼 외부에서 온 문자열은 <a>, <img> 같은 태그가 해석되지 않게 일반 텍스트로만 표시한다."""
+    label = QLabel(text)
+    label.setTextFormat(Qt.PlainText)
+    label.setOpenExternalLinks(False)
+    return label
+
+
+def _confirm(parent: QWidget, title: str, text: str) -> bool:
+    box = QMessageBox(QMessageBox.Question, title, text, QMessageBox.Yes | QMessageBox.No, parent)
+    box.setTextFormat(Qt.PlainText)
+    box.setDefaultButton(QMessageBox.No)
+    return box.exec() == QMessageBox.Yes
+
+
+def _warn(parent: QWidget, title: str, text: str) -> None:
+    box = QMessageBox(QMessageBox.Warning, title, text, QMessageBox.Ok, parent)
+    box.setTextFormat(Qt.PlainText)
+    box.exec()
+
+
 def _item(text: str, *, align_right: bool = False, color: str = "") -> QTableWidgetItem:
     item = QTableWidgetItem(text)
     if align_right:
@@ -92,7 +114,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([440, 300])
         layout.addWidget(splitter, 1)
 
-        self.status = QLabel("종목 코드를 입력하세요. 예) 005930(삼성전자), AAPL")
+        self.status = _plain_label("종목 코드를 입력하세요. 예) 005930(삼성전자), AAPL")
         layout.addWidget(self.status)
         self.setCentralWidget(root)
 
@@ -138,7 +160,7 @@ class MainWindow(QMainWindow):
         search.addWidget(lookup)
         layout.addLayout(search)
 
-        self.name_label = QLabel("-")
+        self.name_label = _plain_label("-")
         self.name_label.setStyleSheet("font-size: 16px; font-weight: 600;")
         self.price_label = QLabel("-")
         self.price_label.setStyleSheet("font-size: 26px; font-weight: 700;")
@@ -226,11 +248,10 @@ class MainWindow(QMainWindow):
                 self.broker.open_account(amount)
                 return True
             except Exception as error:
-                QMessageBox.warning(self, title, str(error))
+                _warn(self, title, str(error))
 
     def reset_account(self) -> None:
-        answer = QMessageBox.question(self, "계좌 초기화", "보유 종목과 거래 내역이 모두 삭제됩니다. 계속할까요?")
-        if answer != QMessageBox.Yes:
+        if not _confirm(self, "계좌 초기화", "보유 종목과 거래 내역이 모두 삭제됩니다. 계속할까요?"):
             return
         # 초기화는 화면 스레드에서 DB를 직접 쓰므로, 자동 갱신을 멈추고 진행 중인 작업이 끝난 뒤 실행한다.
         self.timer.stop()
@@ -277,12 +298,11 @@ class MainWindow(QMainWindow):
         quote = self.current.quote
         quantity = self.quantity.value()
         verb = "매수" if side is Side.BUY else "매도"
-        answer = QMessageBox.question(
+        if not _confirm(
             self,
             f"{verb} 확인",
             f"{quote.name} ({quote.symbol})\n{quantity:,}주를 현재가에 {verb}할까요?\n예상 금액: {self.estimate_label.text()}",
-        )
-        if answer != QMessageBox.Yes:
+        ):
             return
         self._set_order_enabled(False)
         action = self.broker.buy if side is Side.BUY else self.broker.sell
@@ -296,7 +316,7 @@ class MainWindow(QMainWindow):
 
         def failed(message: str) -> None:
             self._set_order_enabled(True)
-            QMessageBox.warning(self, f"{verb} 실패", message)
+            _warn(self, f"{verb} 실패", message)
 
         self.worker.run(lambda: action(quote.symbol, quantity), done, failed)
 
@@ -364,7 +384,7 @@ class MainWindow(QMainWindow):
         self.chart.addAxis(y_axis, Qt.AlignLeft)
         series.attachAxis(x_axis)
         series.attachAxis(y_axis)
-        self.chart.setTitle(f"{quote.name} 최근 3개월 종가")
+        self.chart.setTitle(html.escape(f"{quote.name} 최근 3개월 종가"))  # QChart 제목은 HTML을 해석한다
 
     def _show_portfolio(self, view: _PortfolioView) -> None:
         summary = view.summary
