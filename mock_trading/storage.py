@@ -39,6 +39,13 @@ CREATE TABLE IF NOT EXISTS trades (
     amount_krw   TEXT    NOT NULL,
     fee_krw      TEXT    NOT NULL
 );
+-- 관심 종목은 계좌가 아니라 사용자 설정이라 계좌를 초기화해도 남는다.
+CREATE TABLE IF NOT EXISTS watchlist (
+    symbol    TEXT PRIMARY KEY,
+    name      TEXT NOT NULL,
+    currency  TEXT NOT NULL CHECK (currency IN ('KRW', 'USD')),
+    added_at  TEXT NOT NULL
+);
 """
 
 
@@ -51,6 +58,13 @@ class Ledger:
     cash: Decimal
     holdings: dict[str, Holding]
     realized_profit: Decimal
+
+
+@dataclass(frozen=True)
+class WatchItem:
+    symbol: str
+    name: str
+    currency: Currency
 
 
 def _stored_decimal(value: str, what: str) -> Decimal:
@@ -230,6 +244,42 @@ class Repository:
             )
         except (ValueError, TypeError) as error:
             raise LedgerError(f"거래 #{row['id']}의 기록이 손상되었습니다: {error}") from None
+
+    # ---- 관심 종목 ----
+    @_locked
+    def add_watch(self, symbol: str, name: str, currency: Currency, *, limit: int) -> bool:
+        """추가하면 True, 이미 있으면 False. 개수 확인과 추가를 한 트랜잭션에서 한다."""
+        with self.transaction():
+            if self._conn.execute("SELECT 1 FROM watchlist WHERE symbol = ?", (symbol,)).fetchone():
+                return False
+            count = self._conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0]
+            if count >= limit:
+                raise TradingError(f"관심 종목은 {limit}개까지 담을 수 있습니다.")
+            self._conn.execute(
+                "INSERT INTO watchlist (symbol, name, currency, added_at) VALUES (?, ?, ?, ?)",
+                (symbol, name, currency.value, datetime.now().isoformat(timespec="seconds")),
+            )
+            return True
+
+    @_locked
+    def remove_watch(self, symbol: str) -> bool:
+        cursor = self._conn.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol,))
+        return cursor.rowcount > 0
+
+    @_locked
+    def watchlist(self) -> list[WatchItem]:
+        rows = self._conn.execute("SELECT symbol, name, currency FROM watchlist ORDER BY added_at, symbol").fetchall()
+        items = []
+        for row in rows:
+            try:
+                items.append(WatchItem(row["symbol"], row["name"], Currency(row["currency"])))
+            except ValueError:
+                continue  # 손상된 행은 건너뛴다(장부와 달리 돈과 무관한 설정)
+        return items
+
+    @_locked
+    def is_watched(self, symbol: str) -> bool:
+        return self._conn.execute("SELECT 1 FROM watchlist WHERE symbol = ?", (symbol,)).fetchone() is not None
 
     # ---- 장부에서 계산하는 값 ----
     @_locked
