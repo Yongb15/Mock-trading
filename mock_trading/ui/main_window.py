@@ -92,6 +92,7 @@ class MainWindow(QMainWindow):
         self.worker = Worker()
         self.current: _QuoteView | None = None
         self._order_pending = False
+        self._reset_pending = False
 
         self.setWindowTitle("모의투자")
         self.resize(1200, 780)
@@ -260,8 +261,8 @@ class MainWindow(QMainWindow):
                 _warn(self, title, str(error))
 
     def reset_account(self) -> None:
-        if self._order_pending:
-            self.status.setText("주문을 처리하는 중에는 계좌를 초기화할 수 없습니다.")
+        if self._order_pending or self._reset_pending:
+            self.status.setText("주문이나 초기화를 처리하는 중에는 계좌를 초기화할 수 없습니다.")
             return
         if not _confirm(self, "계좌 초기화", "보유 종목과 거래 내역이 모두 삭제됩니다. 계속할까요?"):
             return
@@ -275,12 +276,22 @@ class MainWindow(QMainWindow):
         # 초기화도 작업 스레드 대기열에 넣는다. 앞서 들어간 작업(시세 조회 등)이 모두 끝난 뒤 실행되고,
         # 그 결과가 초기화 뒤에 화면을 이전 계좌 상태로 되돌리지 않도록 current를 초기화 완료 시점에 비운다.
         def done(_: object) -> None:
+            self._reset_pending = False
             self.current = None
             self._set_order_enabled(False)
             self.status.setText(f"계좌를 {fmt.won(Decimal(amount))}으로 초기화했습니다.")
             self.refresh_all()
 
-        self.worker.run(lambda: self.broker.open_account(amount), done, lambda m: _warn(self, "계좌 초기화", m))
+        def failed(message: str) -> None:
+            self._reset_pending = False
+            self._set_order_enabled(True)
+            _warn(self, "계좌 초기화", message)
+
+        # 초기화가 끝날 때까지 주문 버튼을 끈다. 그 사이 도착하는 시세 결과도 버튼을 다시 켜지 못한다.
+        self._reset_pending = True
+        self._set_order_enabled(False)
+        self.status.setText("계좌를 초기화하는 중...")
+        self.worker.run(lambda: self.broker.open_account(amount), done, failed)
 
     # ------------------------------------------------------------------ 데이터 불러오기
     def refresh_all(self) -> None:
@@ -314,7 +325,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 주문
     def place_order(self, side: Side) -> None:
-        if not self.current or self._order_pending:
+        if not self.current or self._order_pending or self._reset_pending:
             return
         quote = self.current.quote
         quantity = self.quantity.value()
@@ -349,7 +360,9 @@ class MainWindow(QMainWindow):
             _warn(self, f"{verb} 실패", message)
             self.refresh_all()
 
-        self.worker.run(lambda: action(quote.symbol, quantity, expected_price, expected_fx), done, failed)
+        self.worker.run(
+            lambda: action(quote.symbol, quantity, expected_price=expected_price, expected_fx=expected_fx), done, failed
+        )
 
     def _estimate(self, side: Side) -> tuple[Decimal, Decimal]:
         """화면과 확인창에 보여줄 원화 금액과 수수료. 실제 체결과 같은 규칙(broker.fees)으로 계산한다."""
@@ -375,7 +388,7 @@ class MainWindow(QMainWindow):
     def _set_order_enabled(self, enabled: bool) -> None:
         """주문이 진행 중이면 다른 작업 결과가 먼저 도착해도 버튼을 켜지 않는다(중복 주문 방지)."""
         view = self.current
-        enabled = enabled and view is not None and not self._order_pending
+        enabled = enabled and view is not None and not self._order_pending and not self._reset_pending
         self.buy_button.setEnabled(enabled and view.max_buy > 0)
         self.sell_button.setEnabled(enabled and view.held > 0)
 
