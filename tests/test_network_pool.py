@@ -237,7 +237,10 @@ def test_one_letter_symbol_does_not_hide_unrelated_logs(caplog):
 
     def other_thread():
         logger.error("AAPL: Too Many Requests")   # 'T'가 들어 있지만 종목 T가 아님 → 보여야 함
+        logger.error("$TSLA: possibly delisted")   # Mock_Sequrity RN1 재현 → 보여야 함
+        logger.error("Failed to get ticker 'NVDA' 429")
         logger.error("$T: No data found")         # 종목 T → 숨김
+        logger.error("Failed to get ticker 'T'")  # 종목 T → 숨김
         done.set()
 
     with caplog.at_level(logging.WARNING, logger="yfinance"):
@@ -246,5 +249,7 @@ def test_one_letter_symbol_does_not_hide_unrelated_logs(caplog):
             t.start()
             t.join()
     messages = [r.getMessage() for r in caplog.records]
-    assert "AAPL: Too Many Requests" in messages
+    for kept in ["AAPL: Too Many Requests", "$TSLA: possibly delisted", "Failed to get ticker 'NVDA' 429"]:
+        assert kept in messages
     assert "$T: No data found" not in messages
+    assert "Failed to get ticker 'T'" not in messages

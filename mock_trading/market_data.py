@@ -50,7 +50,8 @@ def _quiet_batch_failures(symbols: list[str]):
     me = threading.get_ident()
     # 부분 문자열로 비교하면 "T"·"A" 같은 한 글자 종목 때문에 거의 모든 로그가 숨겨진다 → 코드 앞뒤 경계를 본다
     pattern = re.compile(
-        "|".join(rf"(?<![A-Z0-9.]){re.escape(name)}(?![A-Z0-9])" for name in symbols)
+        # 앞뒤가 영문자(대·소문자)·숫자·코드 기호(. = -)가 아니어야 종목 코드로 본다: "Too Many"의 T는 종목 T가 아니다
+        r"(?<![A-Za-z0-9.=\-])(?:" + "|".join(map(re.escape, symbols)) + r")(?![A-Za-z0-9.=\-])"
     ) if symbols else None
 
     def keep(record: logging.LogRecord) -> bool:
