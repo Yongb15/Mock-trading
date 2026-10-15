@@ -459,7 +459,9 @@ class MainWindow(QMainWindow):
         first = QDateTime(points[0].day, QTime(0, 0))
         x_axis.setRange(first.addDays(-1), QDateTime(points[-1].day, QTime(0, 0)).addDays(1))
         y_axis = QValueAxis()
-        y_axis.setLabelFormat("%.0f")  # 라벨 형식 문자열에는 한글을 쓸 수 없어 단위는 축 제목으로
+        # 변동이 1만원 남짓인 평평한 구간에서는 눈금이 같은 숫자로 찍히지 않게 소수 한 자리까지
+        # (라벨 형식 문자열에는 한글을 쓸 수 없어 단위는 축 제목으로)
+        y_axis.setLabelFormat("%.1f" if max(values) - min(values) < 10 else "%.0f")
         y_axis.setTitleText("만원")
         padding = (max(values) - min(values)) * 0.1 or max(values) * 0.01 or 1
         y_axis.setRange(min(values) - padding, max(values) + padding)

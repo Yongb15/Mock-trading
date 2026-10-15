@@ -251,3 +251,87 @@ def test_single_point_chart_and_best_worst_ignore_fallback_prices():
     text = window.history_label.text()
     assert "최고 1,050,000원" in text and "1,800,000" not in text
     window.close()
+
+
+def test_failed_download_is_not_retried_until_interval():
+    """Mock_Sequrity C1: 실패해도 10분에 한 번만 다시 시도한다(요청 제한 중 계속 두드리지 않게)."""
+    attempts = []
+
+    class Failing:
+        def get_daily_closes(self, *a, **k):
+            attempts.append(1)
+            raise RuntimeError("429")
+
+    cache = DailyCloseCache()
+    now = datetime(2026, 10, 15, 12, 0)
+    for minute in range(10):
+        cache.get(Failing(), ["A.KS"], D, include_fx=False, today=now.date(), now=now + timedelta(minutes=minute))
+    assert len(attempts) == 1
+    cache.get(Failing(), ["A.KS"], D, include_fx=False, today=now.date(), now=now + REFRESH_INTERVAL)
+    assert len(attempts) == 2
+
+
+def test_symbol_missing_from_response_is_fetched_in_full_next_time():
+    """Mock_Sequrity C2: 응답에서 빠진 종목은 다음 시도 때 최근 7일이 아니라 전체 구간을 다시 받는다."""
+    calls = []
+
+    class Partial:
+        def get_daily_closes(self, symbols, start, *, include_usd_krw):
+            calls.append((tuple(symbols), start))
+            return ({"A.KS": {start: Decimal(100)}} if "A.KS" in symbols else {}), {}
+
+    cache = DailyCloseCache()
+    now = datetime(2026, 10, 15, 12, 0)
+    cache.get(Partial(), ["A.KS", "MSFT"], D, include_fx=False, today=now.date(), now=now)
+    cache.get(Partial(), ["A.KS", "MSFT"], D, include_fx=False, today=now.date(), now=now + REFRESH_INTERVAL)
+    assert ("MSFT",) in [c[0] for c in calls[1:]] and (("MSFT",), D) in calls[1:]
+
+
+def test_partially_failed_batch_recovers_full_history_after_interval():
+    """Mock_QA D1 재현 그대로: 1회차에 B만 빈 응답, 11분 뒤 정상 → B의 과거 종가가 복구된다."""
+    start = date(2026, 9, 1)
+    old_day = date(2026, 9, 1)
+    calls = []
+
+    class Flaky:
+        def __init__(self):
+            self.first = True
+
+        def get_daily_closes(self, symbols, s, *, include_usd_krw):
+            calls.append((tuple(symbols), s))
+            data = {sym: {s: Decimal(100)} for sym in symbols}
+            if self.first:
+                data["B"] = {}
+                self.first = False
+            return data, {}
+
+    cache, provider = DailyCloseCache(), Flaky()
+    now = datetime(2026, 10, 15, 12, 0)
+    cache.get(provider, ["A", "B"], start, include_fx=False, today=now.date(), now=now)
+    closes, _ = cache.get(provider, ["A", "B"], start, include_fx=False, today=now.date(), now=now + timedelta(minutes=11))
+    assert (("B",), start) in calls
+    assert closes["B"].get(old_day) == Decimal(100)
+
+
+def test_flat_history_uses_decimal_axis_labels():
+    """Mock_QA D2"""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from mock_trading.broker import Broker
+    from mock_trading.history import AssetPoint
+    from mock_trading.ui.main_window import MainWindow
+
+    from .test_broker import FakeProvider
+
+    QApplication.instance() or QApplication([])
+    broker = Broker(Repository(check_same_thread=False), FakeProvider())
+    broker.open_account(1_000_000)
+    window = MainWindow(broker)
+    flat = [AssetPoint(D + timedelta(days=n), Decimal(1_000_000 + n * 1000), Decimal(0), Decimal(1_000_000)) for n in range(3)]
+    window._show_asset_history(flat)
+    y_axis = [a for a in window.history_chart.axes() if a.orientation().name == "Vertical"][0]
+    assert y_axis.labelFormat() == "%.1f"
+    window.close()

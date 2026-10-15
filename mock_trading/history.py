@@ -131,32 +131,41 @@ _FX_KEY = "__USD_KRW__"
 
 @dataclass
 class DailyCloseCache:
-    """종목·환율별 일봉 종가를 기억한다. 과거 값은 다시 받지 않고, 최근 며칠만 가끔 새로 받는다."""
+    """종목·환율별 일봉 종가를 기억한다. 과거 값은 다시 받지 않고, 최근 며칠만 가끔 새로 받는다.
+
+    한 키는 성공하든 실패하든 REFRESH_INTERVAL에 한 번만 시도한다. 요청 제한(429)에 걸렸을 때
+    계속 두드려 제한을 늘리거나 주문용 시세까지 막지 않기 위해서다.
+    """
     closes: dict[str, dict[date, Decimal]] = field(default_factory=dict)
-    covered_from: dict[str, date] = field(default_factory=dict)
-    refreshed_at: dict[str, datetime] = field(default_factory=dict)
+    covered_from: dict[str, date] = field(default_factory=dict)  # 실제로 값을 받은 구간의 시작
+    attempted_at: dict[str, datetime] = field(default_factory=dict)
 
     def get(self, provider, symbols: list[str], start: date, *, include_fx: bool, today: date, now: datetime):
         keys = list(symbols) + ([_FX_KEY] if include_fx else [])
-        full = [k for k in keys if k not in self.covered_from or self.covered_from[k] > start]
-        recent = [k for k in keys if k not in full and now - self.refreshed_at[k] >= REFRESH_INTERVAL]
+        due = [k for k in keys if k not in self.attempted_at or now - self.attempted_at[k] >= REFRESH_INTERVAL]
+        full = [k for k in due if k not in self.covered_from or self.covered_from[k] > start]
+        recent = [k for k in due if k not in full]
         for group, group_start in ((full, start), (recent, today - timedelta(days=RECENT_DAYS))):
             if not group:
                 continue
+            for key in group:
+                self.attempted_at[key] = now
             group_symbols = [k for k in group if k != _FX_KEY]
             try:
                 closes, usd_krw = provider.get_daily_closes(
                     group_symbols, group_start, include_usd_krw=_FX_KEY in group
                 )
             except Exception:
-                continue  # 이번엔 못 받았으면 기억해 둔 값으로 그리고, 다음에 다시 시도
+                continue  # 이번엔 못 받았으면 기억해 둔 값으로 그리고, 간격이 지난 뒤 다시 시도
             received = dict(closes)
             if _FX_KEY in group:
                 received[_FX_KEY] = usd_krw
             for key in group:
-                self.closes.setdefault(key, {}).update(received.get(key, {}))
+                data = received.get(key)
+                if not data:
+                    continue  # 응답에서 빠진 종목은 "받음"으로 기록하지 않는다 → 다음에 전체 구간을 다시 시도
+                self.closes.setdefault(key, {}).update(data)
                 self.covered_from[key] = min(self.covered_from.get(key, group_start), group_start)
-                self.refreshed_at[key] = now
         return (
             {s: self.closes.get(s, {}) for s in symbols},
             self.closes.get(_FX_KEY, {}) if include_fx else {},
