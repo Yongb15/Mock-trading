@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS orders (
     note         TEXT    NOT NULL DEFAULT '',
     closed_at    TEXT,
     fx_at_order  TEXT,
-    armed        INTEGER NOT NULL DEFAULT 0 CHECK (armed IN (0, 1))
+    armed        INTEGER NOT NULL DEFAULT 0 CHECK (armed IN (0, 1)),
+    armed_at     TEXT
 );
 -- 관심 종목은 계좌가 아니라 사용자 설정이라 계좌를 초기화해도 남는다.
 CREATE TABLE IF NOT EXISTS watchlist (
@@ -127,7 +128,9 @@ class Repository:
         if "fx_at_order" not in order_columns:
             self._conn.execute("ALTER TABLE orders ADD COLUMN fx_at_order TEXT")
         if "armed" not in order_columns:
-            self._conn.execute("ALTER TABLE orders ADD COLUMN armed INTEGER NOT NULL DEFAULT 0")
+            self._conn.execute("ALTER TABLE orders ADD COLUMN armed INTEGER NOT NULL DEFAULT 0 CHECK (armed IN (0, 1))")
+        if "armed_at" not in order_columns:
+            self._conn.execute("ALTER TABLE orders ADD COLUMN armed_at TEXT")
 
     @_locked
     def close(self) -> None:
@@ -301,9 +304,15 @@ class Repository:
                           OrderStatus.OPEN, fx_at_order=fx_at_order)
 
     @_locked
-    def set_order_armed(self, order_id: int, armed: bool) -> None:
+    def set_order_note(self, order_id: int, note: str) -> None:
+        self._conn.execute("UPDATE orders SET note = ? WHERE id = ? AND status = 'OPEN'", (note[:200], order_id))
+
+    @_locked
+    def set_order_armed(self, order_id: int, armed_at: datetime | None) -> None:
+        """armed_at이 있으면 "확인 1회", None이면 해제."""
         self._conn.execute(
-            "UPDATE orders SET armed = ? WHERE id = ? AND status = 'OPEN'", (1 if armed else 0, order_id)
+            "UPDATE orders SET armed = ?, armed_at = ? WHERE id = ? AND status = 'OPEN'",
+            (1 if armed_at else 0, armed_at.isoformat(timespec="seconds") if armed_at else None, order_id),
         )
 
     @_locked
@@ -330,6 +339,7 @@ class Repository:
                     note=row["note"],
                     fx_at_order=_stored_decimal(row["fx_at_order"], "주문 환율") if row["fx_at_order"] else None,
                     armed=bool(row["armed"]),
+                    armed_at=datetime.fromisoformat(row["armed_at"]) if row["armed_at"] else None,
                 ))
             except (ValueError, TypeError, LedgerError):
                 continue  # 손상된 주문은 체결하지 않는다(돈이 움직이기 전이라 건너뛰어도 안전)

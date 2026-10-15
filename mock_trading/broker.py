@@ -43,6 +43,9 @@ LIMIT_PRICE_BAND = (Decimal("0.5"), Decimal("1.5"))
 MAX_OPEN_ORDERS = 50
 # 미국 주식 지정가: 체결 때 환율이 주문 때보다 이만큼(%) 넘게 다르면 체결을 미룬다.
 FX_DRIFT_LIMIT = Decimal(10)
+# 지정가 두 번째 확인은 첫 확인에서 이만큼 지난 뒤여야 한다(자동 갱신 60초보다 조금 짧게 — 타이머가 조금 일찍
+# 돌아도 한 주기를 통째로 미루지 않게).
+CONFIRM_GAP = timedelta(seconds=50)
 # 지정가 확인 중 시세를 못 받은 종목은 이 시간 동안 다시 묻지 않는다(요청 제한 중 계속 두드리지 않게).
 QUOTE_RETRY_INTERVAL = timedelta(minutes=5)
 
@@ -238,24 +241,40 @@ class Broker:
         )
 
     # ---- 지정가 주문 ----
-    def place_limit_order(self, side: Side, symbol: str, quantity: int, limit_price: Decimal) -> LimitOrder:
-        """주문을 저장만 한다. 체결은 check_limit_orders가 시세를 확인할 때 일어난다."""
+    def place_limit_order(
+        self,
+        side: Side,
+        symbol: str,
+        quantity: int,
+        limit_price: Decimal,
+        *,
+        expected_price: Decimal,
+        expected_fx: Decimal | None = None,
+    ) -> LimitOrder:
+        """주문을 저장만 한다. 체결은 check_limit_orders가 시세를 확인할 때 일어난다.
+
+        시장가처럼 사용자가 확인창에서 본 현재가·환율과 5% 넘게 다르면 거부한다. 주문 때 환율은 나중에 체결 때
+        비교 기준이 되므로, 오류 환율이 기준으로 저장되지 않게 하는 것이 특히 중요하다.
+        """
         self._validate_quantity(quantity)
         self._require_account()
         generation = self.repo.account_generation()
         quote = self._checked_quote(symbol)
+        self._check_slippage(quote.price, expected_price, "가격")
         limit = normalize_price(quote.currency, positive_decimal(limit_price, "지정가"))
         low, high = LIMIT_PRICE_BAND
         if not quote.price * low <= limit <= quote.price * high:
             raise TradingError(
                 f"지정가는 현재가의 {low * 100:.0f}%~{high * 100:.0f}% 사이로 정해 주세요."
             )
+        fx_rate = self.fx_rate_for(quote.currency)
+        if quote.currency is not Currency.KRW:
+            self._check_slippage(fx_rate, expected_fx, "환율")
         with self.repo.transaction():
             self._check_generation(generation)
             open_orders = self.repo.orders(open_only=True)
             if len(open_orders) >= MAX_OPEN_ORDERS:
                 raise TradingError(f"대기 중인 지정가 주문은 {MAX_OPEN_ORDERS}개까지 둘 수 있습니다.")
-            fx_rate = self.fx_rate_for(quote.currency)
             if side is Side.SELL:
                 # 이미 걸어 둔 매도 주문까지 합쳐 보유 수량을 넘지 않게 한다.
                 pending = self.pending_sell_quantity(quote.symbol, open_orders)
@@ -314,7 +333,7 @@ class Broker:
                 continue  # 시세를 모르면 판단을 미룬다(확인 1회 표시도 그대로)
             if not order.is_triggered(price):
                 if order.armed:
-                    self.repo.set_order_armed(order.id, False)
+                    self.repo.set_order_armed(order.id, None)
                 continue
             if order.symbol not in confirmed:
                 try:
@@ -325,9 +344,11 @@ class Broker:
             quote = confirmed[order.symbol]
             if quote is None or not order.is_triggered(quote.price):
                 continue
-            if not order.armed:
-                self.repo.set_order_armed(order.id, True)  # 다음 확인에서도 맞으면 체결
+            if not order.armed or order.armed_at is None:
+                self.repo.set_order_armed(order.id, now)  # 다음 확인에서도 맞으면 체결
                 continue
+            if now - order.armed_at < CONFIRM_GAP:
+                continue  # 새로고침 연타처럼 곧바로 다시 확인하면 같은 오류 데이터를 두 번 잡을 수 있어 기다린다
             fx_rate = Decimal(1)
             if order.currency is Currency.USD:
                 if fx_now is None and not fx_failed:
@@ -336,9 +357,17 @@ class Broker:
                     except Exception:
                         fx_failed = True
                 if fx_now is None:
+                    self.repo.set_order_note(order.id, "환율을 받지 못해 체결 보류")
                     continue
-                if order.fx_at_order is None or abs(fx_now - order.fx_at_order) / order.fx_at_order * 100 > FX_DRIFT_LIMIT:
-                    continue  # 환율이 주문 때와 크게 달라 체결을 미룬다(오류 환율로 금액이 부풀지 않게)
+                if order.fx_at_order is None:
+                    self.repo.set_order_note(order.id, "주문 때 환율 기록이 없어 체결 보류 — 취소 후 다시 주문하세요")
+                    continue
+                if abs(fx_now - order.fx_at_order) / order.fx_at_order * 100 > FX_DRIFT_LIMIT:
+                    # 환율이 주문 때와 크게 달라 체결을 미룬다(오류 환율로 금액이 부풀지 않게)
+                    self.repo.set_order_note(
+                        order.id, f"환율 변동으로 체결 보류 (주문 때 {order.fx_at_order:,} → 지금 {fx_now:,})"
+                    )
+                    continue
                 fx_rate = fx_now
             fill = Quote(quote.symbol, order.name, order.limit_price, order.currency, quote.previous_close)
             try:

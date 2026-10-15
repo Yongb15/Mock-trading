@@ -638,12 +638,15 @@ class MainWindow(QMainWindow):
 
     def _notify_order_events(self, events: list[OrderEvent]) -> None:
         """백그라운드에서 일어난 체결·거부를 놓치지 않게: 막지 않는 알림 창과 탭 제목의 건수."""
-        text = "\n".join(self._describe_event(e) for e in events)
+        lines = [self._describe_event(e) for e in events]
         if self._order_notice is None:
             self._order_notice = QMessageBox(QMessageBox.Information, "지정가 주문", "", QMessageBox.Ok, self)
             self._order_notice.setTextFormat(Qt.PlainText)
             self._order_notice.setModal(False)
-        self._order_notice.setText(text)
+            self._order_notice.finished.connect(lambda _: self._order_notice.setText(""))  # 닫으면 비운다
+        previous = self._order_notice.text() if self._order_notice.isVisible() else ""
+        # 아직 안 본 앞선 알림은 지우지 않고 이어 붙인다
+        self._order_notice.setText("\n".join([previous, *lines]) if previous else "\n".join(lines))
         self._order_notice.show()
         if self.tabs.currentWidget() is not self.orders_tab:
             self._unseen_order_events += len(events)
@@ -716,11 +719,20 @@ class MainWindow(QMainWindow):
             f"{quote.name} ({quote.symbol})\n"
             f"현재가 {fmt.price(quote.price, quote.currency)}\n\n"
             f"가격이 {fmt.price(limit, quote.currency)} {condition} {quantity:,}주를 지정가로 {verb}합니다.\n"
-            f"예상 금액: {fmt.won(amount)} (수수료·세금 약 {fmt.won(fee)})\n\n"
-            "앱이 켜져 있는 동안 1분마다 확인하고, 두 번 연속 조건이 맞을 때 체결합니다.\n"
+            f"예상 금액: {fmt.won(amount)} (수수료·세금 약 {fmt.won(fee)})\n"
+            + (f"적용 환율: {self.current.fx_rate:,}원/달러 (주문 기준값으로 저장)\n" if quote.currency is Currency.USD else "")
+            + "\n앱이 켜져 있는 동안 1분마다 확인하고, 1분 이상 간격으로 두 번 연속 조건이 맞을 때 체결합니다.\n"
             "취소할 때까지 유지되며, 체결할 때 현금이나 보유 수량이 부족하면 거부됩니다."
             + ("\n미국 주식은 체결 때 환율이 주문 때보다 10% 넘게 다르면 체결을 미룹니다." if quote.currency is Currency.USD else "")
         )
+        worse = (side is Side.BUY and limit > quote.price) or (side is Side.SELL and limit < quote.price)
+        if worse:
+            gap = abs(limit - quote.price) / quote.price * 100
+            direction = "높은" if side is Side.BUY else "낮은"
+            message = (
+                f"주의: 지정가가 현재가보다 {gap:.1f}% {direction} 가격이라, 곧 지정가로 {verb}하게 됩니다"
+                f"(현재가보다 불리).\n\n" + message
+            )
         if not _confirm(self, f"지정가 {verb} 확인", message):
             return
         self._order_pending = True
@@ -737,7 +749,14 @@ class MainWindow(QMainWindow):
             self._set_order_enabled(True)
             _warn(self, f"지정가 {verb} 실패", message)
 
-        self.worker.run(lambda: self.broker.place_limit_order(side, quote.symbol, quantity, limit), done, failed)
+        expected_price, expected_fx = quote.price, self.current.fx_rate
+        self.worker.run(
+            lambda: self.broker.place_limit_order(
+                side, quote.symbol, quantity, limit, expected_price=expected_price, expected_fx=expected_fx
+            ),
+            done,
+            failed,
+        )
 
     # ------------------------------------------------------------------ 주문
     def place_order(self, side: Side) -> None:

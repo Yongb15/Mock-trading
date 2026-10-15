@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -6,7 +7,10 @@ from mock_trading.broker import MAX_OPEN_ORDERS, Broker, FeePolicy
 from mock_trading.domain import Currency, OrderStatus, Quote, Side, TradingError
 from mock_trading.storage import Repository
 
+from .helpers import AutoConfirmBroker
 from .test_broker import FakeProvider
+
+T0 = datetime(2026, 10, 15, 12, 0)
 
 
 @pytest.fixture
@@ -16,7 +20,7 @@ def provider():
 
 @pytest.fixture
 def broker(provider):
-    b = Broker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
+    b = AutoConfirmBroker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
     b.open_account(10_000_000)
     return b
 
@@ -25,11 +29,22 @@ def set_price(provider, symbol, price, currency=Currency.KRW):
     provider.quotes[symbol] = Quote(symbol, symbol, Decimal(price), currency, Decimal(price))
 
 
+class Clock:
+    """확인 시각을 1분씩 흘려보낸다(두 번째 확인은 첫 확인 50초 뒤부터)."""
+    def __init__(self, start=T0):
+        self.now = start
+
+    def tick(self, seconds=60):
+        self.now += timedelta(seconds=seconds)
+        return self.now
+
+
 def check_twice(broker, now=None):
-    """체결은 두 번 연속 조건이 맞아야 한다: 첫 확인은 표시만, 두 번째 확인의 결과를 돌려준다."""
-    first = broker.check_limit_orders(now)
+    """체결은 50초 이상 간격으로 두 번 연속 조건이 맞아야 한다: 첫 확인은 표시만, 두 번째 결과를 돌려준다."""
+    start = now or T0
+    first = broker.check_limit_orders(start)
     assert first == []
-    return broker.check_limit_orders(now)
+    return broker.check_limit_orders(start + timedelta(seconds=60))
 
 
 def test_buy_waits_until_price_falls_to_limit_and_fills_at_limit_price(broker, provider):
@@ -130,11 +145,14 @@ def test_bad_fx_does_not_fill(broker, provider):
     broker.place_limit_order(Side.SELL, "XYZ", 10, Decimal("101"))   # 주문 환율 1400
     bad_tick(provider, "XYZ", "102", "100")
     provider.usd_krw = Decimal("2900")
-    assert broker.check_limit_orders() == []
-    assert broker.check_limit_orders() == []
-    assert len(broker.repo.trades()) == 1 and broker.repo.orders(open_only=True)
+    clock = Clock()
+    assert broker.check_limit_orders(clock.now) == []
+    assert broker.check_limit_orders(clock.tick()) == []
+    assert len(broker.repo.trades()) == 1
+    [held] = broker.repo.orders(open_only=True)
+    assert "환율 변동으로 체결 보류" in held.note                      # Mock_QA R3: 이유가 보인다
     provider.usd_krw = Decimal("1420")                               # 정상 범위로 돌아오면 체결
-    [event] = broker.check_limit_orders()
+    [event] = broker.check_limit_orders(clock.tick())
     assert event.trade.fx_rate == Decimal("1420.00")
 
 
@@ -197,7 +215,7 @@ def test_cancel_only_open_orders(broker):
 def test_order_cancelled_during_fill_leaves_no_trade(broker, provider):
     """시세를 확인하는 사이(트랜잭션 밖) 사용자가 취소하면 체결 기록을 남기지 않는다."""
     order = broker.place_limit_order(Side.BUY, "005930", 1, Decimal("70000"))
-    broker.check_limit_orders()  # 확인 1회
+    broker.check_limit_orders(T0)  # 확인 1회
     original_fill = broker._fill_order
 
     def cancelled_just_before(*args, **kwargs):
@@ -205,7 +223,7 @@ def test_order_cancelled_during_fill_leaves_no_trade(broker, provider):
         return original_fill(*args, **kwargs)
 
     broker._fill_order = cancelled_just_before
-    assert broker.check_limit_orders() == []
+    assert broker.check_limit_orders(T0 + timedelta(seconds=60)) == []
     assert broker.repo.trades() == []
     assert broker.repo.orders()[0].status is OrderStatus.CANCELLED
     assert broker.repo.cash() == Decimal(10_000_000)
@@ -296,6 +314,10 @@ def test_window_limit_order_flow(provider):
         window.refresh_all()   # 확인 1회
         settle()
         assert window.orders_table.item(0, 6).text() == "대기 (확인 1회)"
+        window.refresh_all()   # 곧바로 다시 확인하면(새로고침 연타) 아직 체결하지 않는다
+        settle()
+        assert broker.repo.trades() == []
+        broker.repo._conn.execute("UPDATE orders SET armed_at = '2026-01-01T00:00:00'")  # 1분이 지난 것으로
         window.refresh_all()   # 두 번째에 체결
         settle()
         assert window.orders_table.item(0, 6).text() == "체결"
@@ -307,3 +329,30 @@ def test_window_limit_order_flow(provider):
     finally:
         mw._confirm = original_confirm
         window.close()
+
+
+
+def test_second_check_needs_a_gap(broker, provider):
+    """Mock_QA R1 / Mock_Sequrity LO7: 두 번째 확인이 몇 초 만에 오면 체결하지 않는다."""
+    broker.place_limit_order(Side.BUY, "005930", 1, Decimal("66000"))
+    set_price(provider, "005930.KS", "60000")
+    assert broker.check_limit_orders(T0) == []
+    assert broker.check_limit_orders(T0 + timedelta(seconds=2)) == []
+    assert broker.check_limit_orders(T0 + timedelta(seconds=49)) == []
+    [event] = broker.check_limit_orders(T0 + timedelta(seconds=50))
+    assert event.trade.price == Decimal("66000")
+
+
+def test_bad_fx_at_order_time_is_rejected(provider):
+    """Mock_Sequrity LO6: 주문하는 순간 환율이 튀면 그 값이 기준으로 저장되지 않게 주문을 거부한다."""
+    plain = Broker(Repository(), provider)
+    plain.open_account(10_000_000)
+    provider.usd_krw = Decimal("2900")
+    with pytest.raises(TradingError, match="환율"):
+        plain.place_limit_order(Side.BUY, "AAPL", 1, Decimal("200"), expected_price=Decimal("200.50"),
+                                expected_fx=Decimal("1300"))
+    with pytest.raises(TradingError, match="확인한 환율"):
+        plain.place_limit_order(Side.BUY, "AAPL", 1, Decimal("200"), expected_price=Decimal("200.50"))
+    with pytest.raises(TypeError):
+        plain.place_limit_order(Side.BUY, "005930", 1, Decimal("70000"))  # 확인 가격은 필수
+    assert plain.repo.orders() == []

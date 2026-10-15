@@ -155,6 +155,7 @@ class LimitOrder:
     note: str = ""
     fx_at_order: Decimal | None = None  # 미국 주식: 주문할 때의 환율(체결 때 크게 다르면 보류)
     armed: bool = False                 # 직전 확인에서 이미 조건이 맞았는지(두 번 연속 맞아야 체결)
+    armed_at: datetime | None = None    # 처음 조건이 맞은 시각(두 번째 확인은 최소 간격 뒤에만)
 
     def is_triggered(self, price: Decimal) -> bool:
         return price <= self.limit_price if self.side is Side.BUY else price >= self.limit_price
