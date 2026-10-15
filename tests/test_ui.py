@@ -107,10 +107,14 @@ def test_cancel_confirmation_counts_only_open_orders(window, app):
 
     from mock_trading.ui import main_window as mw
 
+    from mock_trading.domain import OrderStatus
+
     window.orders_table.setRowCount(3)
-    for row, (order_id, status) in enumerate([(3, "대기"), (2, "체결"), (1, "대기 (확인 1회)")]):
+    rows = [(3, "기다리는 중", OrderStatus.OPEN), (2, "체결", OrderStatus.FILLED), (1, "대기 (확인 1회)", OrderStatus.OPEN)]
+    for row, (order_id, text, status) in enumerate(rows):
         window.orders_table.setItem(row, 0, QTableWidgetItem(str(order_id)))
-        window.orders_table.setItem(row, 6, QTableWidgetItem(status))
+        # 문구가 "대기"로 시작하지 않아도(Mock_QA Z3) 담아 둔 상태 값으로 판단한다
+        window.orders_table.setItem(row, 6, window._status_item(text, "", status))
     window.orders_table.selectAll()
     asked = []
     original = mw._confirm

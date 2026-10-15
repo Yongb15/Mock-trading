@@ -42,21 +42,27 @@ DOWNLOAD_THREADS = 4
 
 
 @contextmanager
-def _quiet_batch_failures():
-    """일괄 조회에서는 yfinance가 실패한 종목을 stderr에 찍는다. 실패는 결과에서 빠지는 것으로 드러나므로
-    이 구간에서만 조용히 하고, 주문 경로(get_quote·환율)의 로그는 그대로 둔다."""
+def _quiet_batch_failures(symbols: list[str]):
+    """일괄 조회에서 yfinance는 실패한 종목을 stderr에 찍는다(종목별 오류는 yfinance 내부 스레드에서).
+    실패는 결과에서 빠지는 것으로 드러나므로, 이 구간 동안 이 스레드의 요약 메시지와 **이번 조회 종목**이 들어간
+    메시지만 거른다. 레벨을 바꾸지 않으므로 다른 종목·다른 스레드(주문 경로) 로그는 그대로 남는다."""
     logger = logging.getLogger("yfinance")
     me = threading.get_ident()
+    names = tuple(symbols)
 
-    def not_mine(record: logging.LogRecord) -> bool:
-        # 로거 레벨을 바꾸면 다른 스레드(주문 경로)의 로그까지 숨겨진다 → 이 스레드의 기록만 거른다
-        return record.thread != me
+    def keep(record: logging.LogRecord) -> bool:
+        if record.thread == me:
+            return False
+        message = record.getMessage()
+        return not any(name in message for name in names)
 
-    logger.addFilter(not_mine)
+    logger.addFilter(keep)
     try:
         yield
     finally:
-        logger.removeFilter(not_mine)
+        logger.removeFilter(keep)
+
+
 HISTORY_PERIODS = frozenset({"1mo", "3mo", "6mo", "1y", "5y"})
 
 # 허용하는 종목 코드 형태. 임의 문자열이 외부 API 요청으로 그대로 나가지 않게 한다.
@@ -175,7 +181,7 @@ class YFinanceProvider:
         if not _DOWNLOAD_LOCK.acquire(timeout=-1 if wait is None else wait):
             raise DownloadBusy()
         try:
-            with _quiet_batch_failures():
+            with _quiet_batch_failures(symbols):
                 frame = self._yf.download(
                     symbols, period="5d", progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS
                 )
@@ -203,7 +209,7 @@ class YFinanceProvider:
             tickers.append(USD_KRW_SYMBOL)
         if not tickers:
             return {}, {}
-        with _DOWNLOAD_LOCK, _quiet_batch_failures():
+        with _DOWNLOAD_LOCK, _quiet_batch_failures(tickers):
             frame = self._yf.download(
                 tickers, start=start.isoformat(), progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS
             )
