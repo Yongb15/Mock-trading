@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
 from PySide6.QtCore import QDateTime, Qt, QTime, QTimer
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QGridLayout,
@@ -75,7 +75,9 @@ def _order_button_style(color: str) -> str:
     # 배경색을 직접 지정하면 비활성 상태도 같은 색으로 보이므로 :disabled 모양을 따로 둔다.
     return (
         f"QPushButton {{ background: {color}; color: white; border-radius: 14px; padding: 12px;"
-        " font-size: 16px; font-weight: 700; }"
+        " font-size: 16px; font-weight: 700; border: 2px solid transparent; }"
+        # 빨강·파랑 위에서도 보이도록 포커스 테두리는 어두운 색
+        "QPushButton:focus { border: 2px solid #191F28; }"
         "QPushButton:disabled { background: #E5E8EB; color: #8B95A1; }"
     )
 
@@ -266,15 +268,17 @@ class MainWindow(QMainWindow):
     def _build_tables(self) -> QWidget:
         tabs = QTabWidget()
         self.holdings_table = self._table(["종목", "코드", "수량", "평균 매입가", "현재가", "평가 금액", "평가 손익", "수익률"])
-        self.holdings_table.cellDoubleClicked.connect(self._open_holding)
+        # 더블클릭과 Enter 모두로 연다
+        self.holdings_table.itemActivated.connect(lambda item: self._open_holding(item.row(), item.column()))
         self.trades_table = self._table(["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료"])
         self.watch_table = self._table(["종목", "코드", "현재가", "전일 대비"])
-        self.watch_table.cellDoubleClicked.connect(self._open_watch)
+        self.watch_table.itemActivated.connect(lambda item: self._open_watch(item.row(), item.column()))
+        QShortcut(QKeySequence.Delete, self.watch_table, self._remove_selected_watch, context=Qt.WidgetShortcut)
         watch_tab = self.watch_tab = QWidget()
         watch_layout = QVBoxLayout(watch_tab)
         watch_layout.setContentsMargins(0, 0, 0, 0)
         watch_layout.addWidget(self.watch_table, 1)
-        remove = QPushButton("선택한 종목 빼기")
+        remove = QPushButton("선택한 종목 빼기 (Delete)")
         remove.clicked.connect(self._remove_selected_watch)
         watch_layout.addWidget(remove, 0, Qt.AlignRight)
         tabs.addTab(self.holdings_table, "보유 종목")
@@ -298,8 +302,9 @@ class MainWindow(QMainWindow):
         orders_layout = QVBoxLayout(orders_tab)
         orders_layout.setContentsMargins(0, 0, 0, 0)
         self.orders_table = self._table(["번호", "주문 시각", "구분", "종목", "수량", "지정가", "상태", "비고"])
+        QShortcut(QKeySequence.Delete, self.orders_table, self._cancel_selected_orders, context=Qt.WidgetShortcut)
         orders_layout.addWidget(self.orders_table, 1)
-        cancel = QPushButton("선택한 대기 주문 취소")
+        cancel = QPushButton("선택한 대기 주문 취소 (Delete)")
         cancel.clicked.connect(self._cancel_selected_orders)
         orders_layout.addWidget(cancel, 0, Qt.AlignRight)
         tabs.addTab(orders_tab, "지정가 주문")
@@ -318,7 +323,6 @@ class MainWindow(QMainWindow):
         table.verticalHeader().hide()
         table.verticalHeader().setDefaultSectionSize(44)
         table.setShowGrid(False)
-        table.setFocusPolicy(Qt.NoFocus)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         return table
 

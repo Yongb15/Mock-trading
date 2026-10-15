@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication
 BACKGROUND = "#F2F4F6"
 CARD = "#FFFFFF"
 TEXT = "#191F28"
-TEXT_SUB = "#6B7684"   # 흰 바탕 대비 4.5:1 이상
+TEXT_SUB = "#5F6B7A"   # 흰 바탕·회색 바탕(#F2F4F6) 모두 대비 4.5:1 이상
 LINE = "#E5E8EB"
 ACCENT = "#1E5FD9"
 ACCENT_SOFT = "#E8EEFB"
@@ -47,7 +47,7 @@ QGroupBox#flat::title {{ left: 0; top: 8px; }}
 QWidget#card {{ background: {CARD}; border-radius: 20px; }}
 QPushButton {{
     background: {BACKGROUND};
-    border: none;
+    border: 2px solid transparent;
     border-radius: 12px;
     padding: 9px 16px;
     min-height: 24px;
@@ -55,6 +55,12 @@ QPushButton {{
     color: #333D4B;
 }}
 QPushButton:hover {{ background: {LINE}; }}
+QPushButton:focus {{ border: 2px solid {ACCENT}; }}
+/* A3: 흰 대화상자 위 버튼은 테두리로 모양을 보이게, 기본 버튼(Enter)은 파랗게 */
+QDialog QPushButton {{ border: 1px solid #A8B0B9; background: {CARD}; }}
+QDialog QPushButton:focus {{ border: 2px solid {ACCENT}; }}
+QDialog QPushButton:default {{ background: {ACCENT}; color: #FFFFFF; border: 2px solid {ACCENT}; }}
+QDialog QPushButton:default:focus {{ border: 2px solid {TEXT}; }}
 QPushButton:disabled {{ color: #B0B8C1; }}
 QPushButton:checked {{ background: #FFF4E5; color: #B86100; }}
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
@@ -95,6 +101,7 @@ QTabWidget::pane {{
 }}
 QTabBar::tab {{
     background: transparent;
+    border: 2px solid transparent;
     color: {TEXT_SUB};
     padding: 10px 18px;
     margin: 0 4px 8px 0;
@@ -103,14 +110,17 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{ background: {CARD}; color: {TEXT}; }}
 QTabBar::tab:hover:!selected {{ background: {LINE}; }}
+QTabBar::tab:focus {{ border: 2px solid {ACCENT}; }}
 QTableWidget {{
     background: {CARD};
-    border: none;
+    border: 2px solid transparent;
+    border-radius: 12px;
     gridline-color: transparent;
     selection-background-color: {ACCENT_SOFT};
     selection-color: {TEXT};
     outline: none;
 }}
+QTableWidget:focus {{ border: 2px solid {ACCENT}; }}
 QTableWidget::item {{ padding: 6px 10px; border-bottom: 1px solid #F2F4F6; }}
 QHeaderView::section {{
     background: {CARD};
