@@ -122,6 +122,8 @@ class MainWindow(QMainWindow):
         self._watch_loading = False
         self._portfolio_loading = False
         self._history_loading = False
+        self._history_reload = False
+        self._watch_reload = False
         self._orders_checking = False
         self._unseen_order_events = 0
         self._order_notice: QMessageBox | None = None
@@ -528,6 +530,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ 자산 추이
     def load_asset_history(self) -> None:
         if self._history_loading:
+            self._history_reload = True  # 진행 중인 조회는 이 요청 전 상태일 수 있으니 끝나면 한 번 더
             return
         self._history_loading = True
 
@@ -538,6 +541,10 @@ class MainWindow(QMainWindow):
 
         def done(points: list[AssetPoint]) -> None:
             self._history_loading = False
+            if self._history_reload:
+                self._history_reload = False
+                self.load_asset_history()
+                return
             if generation != self._view_generation:
                 self._load_visible_tab()  # 초기화 전 계좌의 결과 → 버리고 새 계좌로 다시
                 return
@@ -611,7 +618,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 관심 종목
     def load_watchlist(self) -> None:
-        if self._watch_loading:  # 직전 갱신이 아직 대기열에 있으면 또 넣지 않는다
+        if self._watch_loading:  # 직전 갱신이 아직 진행 중이면 또 넣지 않고, 끝난 뒤 한 번 더
+            self._watch_reload = True
             return
         self._watch_loading = True
 
@@ -619,6 +627,10 @@ class MainWindow(QMainWindow):
 
         def done(rows: list[WatchRow]) -> None:
             self._watch_loading = False
+            if self._watch_reload:
+                self._watch_reload = False
+                self.load_watchlist()
+                return
             if generation != self._view_generation:
                 self._load_visible_tab()
                 return
@@ -730,6 +742,7 @@ class MainWindow(QMainWindow):
             if events:
                 self._notify_order_events(events)
                 self.load_portfolio()
+                self._load_visible_tab()  # 자산 추이를 보고 있었다면 방금 체결도 그래프에
 
         def failed(message: str) -> None:
             self._orders_checking = False

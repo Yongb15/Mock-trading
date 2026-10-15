@@ -204,11 +204,14 @@ def test_window_skips_duplicate_watch_refresh_and_only_refreshes_visible_tab(pro
     assert calls == []
 
     window.tabs.setCurrentWidget(window.watch_tab)  # 탭 전환 시 1회
-    window._watch_loading = True                    # 진행 중인 척
     window.refresh_all()
-    window.worker.wait(3000)
-    app.processEvents()
-    assert len(calls) == 1
+    window.refresh_all()                            # 첫 조회가 진행 중일 때 두 번 더 요청해도
+    for _ in range(5):                              # 첫 조회 → 끝난 뒤 다시 1회까지 모두 처리
+        window.worker.wait(3000)
+        window.reader.wait(3000)
+        app.processEvents()
+    assert len(calls) == 2                          # 겹쳐 넣지 않고, 끝난 뒤 딱 한 번 더(Mock_QA P1)
+    assert window._watch_reload is False
 
     window._watch_pending = True
     window.load_quote("AAPL")
