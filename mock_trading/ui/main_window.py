@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import html
+from datetime import date
 from dataclasses import dataclass
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QDateTime, Qt, QTime, QTimer
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QGridLayout,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from ..broker import PRICE_SLIPPAGE_LIMIT, AccountSummary, Broker
 from ..domain import MAX_ORDER_QUANTITY, Position, Quote, Side, Trade, krw
+from ..history import AssetPoint, load_asset_history
 from ..market_data import PricePoint
 from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
@@ -107,6 +109,7 @@ class MainWindow(QMainWindow):
         self._watch_pending = False
         self._watch_loading = False
         self._portfolio_loading = False
+        self._history_loading = False
 
         self.setWindowTitle("모의투자")
         self.resize(1200, 780)
@@ -250,7 +253,20 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.holdings_table, "보유 종목")
         tabs.addTab(self.trades_table, "거래 내역")
         tabs.addTab(watch_tab, "관심 종목")
-        tabs.currentChanged.connect(lambda _: self.tabs.currentWidget() is self.watch_tab and self.load_watchlist())
+
+        history_tab = self.history_tab = QWidget()
+        history_layout = QVBoxLayout(history_tab)
+        history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_label = QLabel("-")
+        history_layout.addWidget(self.history_label)
+        self.history_chart = QChart()
+        self.history_chart.setTitle("날짜별 총자산")
+        history_view = QChartView(self.history_chart)
+        history_view.setRenderHint(QPainter.Antialiasing)
+        history_layout.addWidget(history_view, 1)
+        tabs.addTab(history_tab, "자산 추이")
+
+        tabs.currentChanged.connect(lambda _: self._load_visible_tab())
         self.tabs = tabs
         return tabs
 
@@ -336,9 +352,15 @@ class MainWindow(QMainWindow):
         self.load_portfolio()
         if self.current:
             self.load_quote(self.current.quote.symbol)
-        # 관심 종목은 가장 덜 급하므로 맨 뒤에, 탭이 보일 때만.
-        if self.tabs.currentWidget() is self.watch_tab:
+        # 관심 종목·자산 추이는 가장 덜 급하므로 맨 뒤에, 탭이 보일 때만.
+        self._load_visible_tab()
+
+    def _load_visible_tab(self) -> None:
+        current = self.tabs.currentWidget()
+        if current is self.watch_tab:
             self.load_watchlist()
+        elif current is self.history_tab:
+            self.load_asset_history()
 
     def load_portfolio(self) -> None:
         if self._portfolio_loading:  # 직전 갱신이 아직 대기열에 있으면 또 넣지 않는다(느린 네트워크에서 쌓임 방지)
@@ -380,6 +402,73 @@ class MainWindow(QMainWindow):
             )
 
         self.worker.run(job, self._show_quote, self._show_error)
+
+    # ------------------------------------------------------------------ 자산 추이
+    def load_asset_history(self) -> None:
+        if self._history_loading:
+            return
+        self._history_loading = True
+
+        def job() -> list[AssetPoint]:
+            return load_asset_history(self.broker.repo, self.broker.provider, date.today())
+
+        def done(points: list[AssetPoint]) -> None:
+            self._history_loading = False
+            self._show_asset_history(points)
+
+        def failed(message: str) -> None:
+            self._history_loading = False
+            self._show_error(message)
+
+        self.worker.run(job, done, failed)
+
+    def _show_asset_history(self, points: list[AssetPoint]) -> None:
+        chart = self.history_chart
+        chart.removeAllSeries()
+        for axis in chart.axes():
+            chart.removeAxis(axis)
+        if not points:
+            self.history_label.setText("-")
+            return
+
+        total = QLineSeries()
+        total.setName("총자산")
+        last = points[-1]
+        total.setColor(QColor(fmt.color_for(last.return_rate) or "#495057"))
+        principal = QLineSeries()
+        principal.setName("기초 자금")
+        pen = QPen(QColor("#adb5bd"))
+        pen.setStyle(Qt.DashLine)
+        principal.setPen(pen)
+        values = []
+        for point in points:
+            x = QDateTime(point.day, QTime(0, 0)).toMSecsSinceEpoch()
+            total.append(x, float(point.total))
+            principal.append(x, float(point.initial_cash))
+            values += [float(point.total), float(point.initial_cash)]
+        chart.addSeries(principal)
+        chart.addSeries(total)
+
+        x_axis = QDateTimeAxis()
+        x_axis.setFormat("MM/dd")
+        y_axis = QValueAxis()
+        y_axis.setLabelFormat("%.0f")
+        padding = (max(values) - min(values)) * 0.1 or max(values) * 0.01 or 1
+        y_axis.setRange(min(values) - padding, max(values) + padding)
+        chart.addAxis(x_axis, Qt.AlignBottom)
+        chart.addAxis(y_axis, Qt.AlignLeft)
+        for series in (principal, total):
+            series.attachAxis(x_axis)
+            series.attachAxis(y_axis)
+
+        best = max(points, key=lambda p: p.total)
+        worst = min(points, key=lambda p: p.total)
+        note = "  · 종가가 없는 날은 마지막 체결가로 계산" if any(p.missing_price for p in points) else ""
+        self.history_label.setText(
+            f"{points[0].day:%Y-%m-%d} ~ {last.day:%Y-%m-%d}  |  현재 {fmt.won(last.total)} ({fmt.percent(last.return_rate)})"
+            f"  |  최고 {fmt.won(best.total)} ({best.day:%m/%d})  ·  최저 {fmt.won(worst.total)} ({worst.day:%m/%d}){note}"
+        )
+        self.history_label.setStyleSheet(f"color: {fmt.color_for(last.return_rate)};")
 
     # ------------------------------------------------------------------ 관심 종목
     def load_watchlist(self) -> None:

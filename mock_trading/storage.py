@@ -12,7 +12,7 @@ import uuid
 from functools import wraps
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Iterator
@@ -140,6 +140,16 @@ class Repository:
     def hold_for_exit(self, timeout: float) -> bool:
         """종료 직전에만 쓴다: 진행 중인 트랜잭션이 끝날 때까지 기다린 뒤 잠금을 잡고 놓지 않는다."""
         return self._lock.acquire(timeout=timeout)
+
+    @_locked
+    def account_opened_on(self) -> date:
+        row = self._conn.execute("SELECT created_at FROM account WHERE id = 1").fetchone()
+        if row is None:
+            raise LookupError("계좌가 아직 없습니다.")
+        try:
+            return datetime.fromisoformat(row["created_at"]).date()
+        except ValueError:
+            raise LedgerError(f"계좌 개설일이 손상되었습니다: {row['created_at']!r}") from None
 
     @_locked
     def account_generation(self) -> str | None:
