@@ -789,9 +789,14 @@ class MainWindow(QMainWindow):
 
     def _cancel_selected_orders(self) -> None:
         rows = sorted({index.row() for index in self.orders_table.selectedIndexes()})
-        ids = [int(self.orders_table.item(row, 0).text()) for row in rows]
-        if not ids:
+        if not rows:
             self.status.setText("취소할 주문을 표에서 선택하세요.")
+            return
+        # 이미 체결·취소·거부된 행은 빼고 대기 중인 주문만 센다(상태 칸: "대기" 또는 "대기 (확인 1회)").
+        ids = [int(self.orders_table.item(row, 0).text()) for row in rows
+               if self.orders_table.item(row, 6).text().startswith("대기")]
+        if not ids:
+            self.status.setText("선택한 주문 중 대기 중인 주문이 없습니다.")
             return
         # Delete 키 하나로 되돌릴 수 없는 취소가 일어나지 않게 확인한다(관심 종목 빼기는 다시 담으면 되니 확인 없음).
         if not _confirm(self, "대기 주문 취소", f"선택한 대기 주문 {len(ids)}건을 취소할까요?"):
