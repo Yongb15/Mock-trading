@@ -174,28 +174,82 @@ def test_limit_check_does_not_wait_long_for_another_download():
     _ = (Currency, Quote)
 
 
-def test_order_path_logs_are_not_hidden_by_another_threads_download(caplog):
-    """Mock_Sequrity NP2: 일괄 조회 중에도 다른 스레드의 yfinance 로그는 보인다."""
+def test_batch_logs_hide_only_this_batchs_symbols(caplog):
+    """Mock_Sequrity NP2 + Mock_QA Z1: 일괄 조회 중에 숨기는 건 (1) 조회한 스레드의 요약과 (2) 이번 조회 종목이 들어간
+    메시지뿐이다. yfinance 내부 스레드가 찍는 종목별 오류도 숨기고, 다른 종목·다른 스레드 로그는 그대로 보인다."""
     import logging
 
     from mock_trading.market_data import _quiet_batch_failures
 
     logger = logging.getLogger("yfinance")
     inside, release = threading.Event(), threading.Event()
+    errors = []
 
     def batch():
-        with _quiet_batch_failures():
-            logger.error("batch-thread failure")  # 이건 숨김
+        try:
+            with _quiet_batch_failures(["ZZZZ9"]):
+                logger.error("1 Failed download")                          # 호출 스레드의 요약 → 숨김
+                worker = threading.Thread(target=lambda: logger.error("$ZZZZ9: No data found"))
+                worker.start()                                              # yfinance 내부 스레드 흉내 → 숨김
+                worker.join()
+                inside.set()
+                release.wait(5)
+        except BaseException as error:  # 스레드 예외가 조용히 묻히지 않게
+            errors.append(error)
             inside.set()
-            release.wait(5)
 
-    t = threading.Thread(target=batch)
-    t.start()
-    inside.wait(5)
     with caplog.at_level(logging.WARNING, logger="yfinance"):
-        logger.error("order-path error")             # 주문 경로 스레드의 로그는 보여야 한다
-    release.set()
-    t.join()
+        t = threading.Thread(target=batch)
+        t.start()
+        inside.wait(5)
+        logger.error("AAPL: order-path error")                              # 다른 종목·다른 스레드 → 보임
+        release.set()
+        t.join()
+    assert errors == []
     messages = [r.getMessage() for r in caplog.records]
-    assert "order-path error" in messages
-    assert "batch-thread failure" not in messages
+    assert "AAPL: order-path error" in messages
+    assert "1 Failed download" not in messages
+    assert "$ZZZZ9: No data found" not in messages
+
+
+def test_result_is_shown_before_reloading(window, app):
+    """Mock_QA Z2: 진행 중에 요청이 들어와도 받은 결과는 먼저 보여 주고, 그다음 1회 다시 불러온다."""
+    shown, calls = [], []
+    window._show_watchlist = lambda rows: shown.append(len(calls))
+    window.watchlist.rows = lambda: calls.append(1) or []
+    window.tabs.setCurrentWidget(window.watch_tab)   # 1번째 조회 시작
+    window.load_watchlist()                           # 진행 중 요청 → 끝난 뒤 1회
+    for _ in range(5):
+        window.reader.wait(3000)
+        pump(app, 0.05)
+    assert len(calls) == 2
+    assert shown == [1, 2]                            # 두 결과 모두 표시(첫 결과를 버리지 않음)
+
+
+def test_one_letter_symbol_does_not_hide_unrelated_logs(caplog):
+    """Mock_QA: "T" 같은 한 글자 종목이 있어도 다른 종목 메시지는 숨기지 않는다(코드 경계 비교)."""
+    import logging
+
+    from mock_trading.market_data import _quiet_batch_failures
+
+    logger = logging.getLogger("yfinance")
+    done = threading.Event()
+
+    def other_thread():
+        logger.error("AAPL: Too Many Requests")   # 'T'가 들어 있지만 종목 T가 아님 → 보여야 함
+        logger.error("$TSLA: possibly delisted")   # Mock_Sequrity RN1 재현 → 보여야 함
+        logger.error("Failed to get ticker 'NVDA' 429")
+        logger.error("$T: No data found")         # 종목 T → 숨김
+        logger.error("Failed to get ticker 'T'")  # 종목 T → 숨김
+        done.set()
+
+    with caplog.at_level(logging.WARNING, logger="yfinance"):
+        with _quiet_batch_failures(["T"]):
+            t = threading.Thread(target=other_thread)
+            t.start()
+            t.join()
+    messages = [r.getMessage() for r in caplog.records]
+    for kept in ["AAPL: Too Many Requests", "$TSLA: possibly delisted", "Failed to get ticker 'NVDA' 429"]:
+        assert kept in messages
+    assert "$T: No data found" not in messages
+    assert "Failed to get ticker 'T'" not in messages

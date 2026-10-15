@@ -541,17 +541,17 @@ class MainWindow(QMainWindow):
 
         def done(points: list[AssetPoint]) -> None:
             self._history_loading = False
-            if self._history_reload:
-                self._history_reload = False
-                self.load_asset_history()
-                return
             if generation != self._view_generation:
                 self._load_visible_tab()  # 초기화 전 계좌의 결과 → 버리고 새 계좌로 다시
                 return
-            self._show_asset_history(points)
+            self._show_asset_history(points)  # 받은 결과는 먼저 보여 주고
+            if self._history_reload:          # 그 사이 들어온 요청이 있었으면 한 번 더
+                self._history_reload = False
+                self.load_asset_history()
 
         def failed(message: str) -> None:
             self._history_loading = False
+            self._history_reload = False
             self._show_error(message)
 
         self.reader.run(job, done, failed)
@@ -627,17 +627,17 @@ class MainWindow(QMainWindow):
 
         def done(rows: list[WatchRow]) -> None:
             self._watch_loading = False
-            if self._watch_reload:
-                self._watch_reload = False
-                self.load_watchlist()
-                return
             if generation != self._view_generation:
                 self._load_visible_tab()
                 return
             self._show_watchlist(rows)
+            if self._watch_reload:
+                self._watch_reload = False
+                self.load_watchlist()
 
         def failed(message: str) -> None:
             self._watch_loading = False
+            self._watch_reload = False
             self._show_error(message)
 
         self.reader.run(self.watchlist.rows, done, failed)
@@ -802,20 +802,27 @@ class MainWindow(QMainWindow):
                 _item(f"{order.name} ({order.symbol})"),
                 _item(f"{order.quantity:,}", align_right=True),
                 _item(fmt.price(order.limit_price, order.currency), align_right=True),
-                _item(status, color=color),
+                self._status_item(status, color, order.status),
                 _item(order.note),
             ]
             for column, cell in enumerate(values):
                 self.orders_table.setItem(row, column, cell)
+
+    @staticmethod
+    def _status_item(text: str, color: str, status: OrderStatus) -> QTableWidgetItem:
+        """보이는 문구와 별개로 실제 상태 값을 담아 둔다(문구를 바꿔도 취소 판단이 흔들리지 않게)."""
+        item = _item(text, color=color)
+        item.setData(Qt.UserRole, status.value)
+        return item
 
     def _cancel_selected_orders(self) -> None:
         rows = sorted({index.row() for index in self.orders_table.selectedIndexes()})
         if not rows:
             self.status.setText("취소할 주문을 표에서 선택하세요.")
             return
-        # 이미 체결·취소·거부된 행은 빼고 대기 중인 주문만 센다(상태 칸: "대기" 또는 "대기 (확인 1회)").
+        # 이미 체결·취소·거부된 행은 빼고 대기 중인 주문만 센다(보이는 문구가 아니라 상태 칸에 담아 둔 값으로).
         ids = [int(self.orders_table.item(row, 0).text()) for row in rows
-               if self.orders_table.item(row, 6).text().startswith("대기")]
+               if self.orders_table.item(row, 6).data(Qt.UserRole) == OrderStatus.OPEN.value]
         if not ids:
             self.status.setText("선택한 주문 중 대기 중인 주문이 없습니다.")
             return
