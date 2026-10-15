@@ -4,8 +4,8 @@ from decimal import Decimal
 
 from ..domain import Currency, krw
 
-UP_COLOR = "#d6336c"    # 한국 증시 관례: 상승 빨강
-DOWN_COLOR = "#1c7ed6"  # 하락 파랑
+UP_COLOR = "#E02D3C"    # 한국 증시 관례: 상승 빨강
+DOWN_COLOR = "#1E5FD9"  # 하락 파랑 (흰 바탕 대비 4.5:1 이상)
 
 
 def won(value: Decimal) -> str:

@@ -7,13 +7,17 @@ QuoteProvider 인터페이스 뒤에 yfinance를 숨겨, 테스트에서는 가�
 """
 from __future__ import annotations
 
+import logging
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol
 
 from .domain import (
+    USD_KRW_MAX,
+    USD_KRW_MIN,
     Currency,
     Quote,
     TradingError,
@@ -24,6 +28,22 @@ from .domain import (
 )
 
 USD_KRW_SYMBOL = "KRW=X"
+
+# 일괄 조회 때 동시에 보내는 요청 수 상한. 너무 많이 몰리면 Yahoo가 요청을 제한(429)해 주문용 시세까지 실패할 수 있다.
+DOWNLOAD_THREADS = 4
+
+
+@contextmanager
+def _quiet_batch_failures():
+    """일괄 조회에서는 yfinance가 실패한 종목을 stderr에 찍는다. 실패는 결과에서 빠지는 것으로 드러나므로
+    이 구간에서만 조용히 하고, 주문 경로(get_quote·환율)의 로그는 그대로 둔다."""
+    logger = logging.getLogger("yfinance")
+    previous = logger.level
+    logger.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
 HISTORY_PERIODS = frozenset({"1mo", "3mo", "6mo", "1y", "5y"})
 
 # 허용하는 종목 코드 형태. 임의 문자열이 외부 API 요청으로 그대로 나가지 않게 한다.
@@ -41,6 +61,16 @@ class QuoteProvider(Protocol):
     def get_quote(self, symbol: str) -> Quote: ...
     def get_usd_krw(self) -> Decimal: ...
     def get_history(self, symbol: str, period: str = "3mo") -> list[PricePoint]: ...
+
+
+def is_valid_symbol(value: object) -> bool:
+    return isinstance(value, str) and _SYMBOL_PATTERN.fullmatch(value) is not None
+
+
+def symbol_candidates(raw: object) -> list[str]:
+    """6자리 한국 코드는 저장될 수 있는 두 형태(.KS/.KQ)를, 그 밖에는 정규화한 코드 하나를 돌려준다."""
+    symbol = normalize_symbol(raw)
+    return [f"{symbol}.KS", f"{symbol}.KQ"] if _KR_CODE.fullmatch(symbol) else [symbol]
 
 
 def normalize_symbol(raw: object) -> str:
@@ -110,6 +140,74 @@ class YFinanceProvider:
 
     def get_usd_krw(self) -> Decimal:
         return normalize_fx(positive_decimal(self._yf.Ticker(USD_KRW_SYMBOL).fast_info.last_price, "환율"))
+
+    def get_quotes(self, items: list[tuple[str, str, Currency]]) -> dict[str, Quote]:
+        """관심 종목처럼 여러 종목을 한 번의 호출로 조회한다. 실패한 종목은 결과에서 빠진다.
+
+        yfinance는 내부적으로 종목마다 요청을 보내므로(최대 DOWNLOAD_THREADS개씩 병렬) 종목 수만큼 요청이 나간다.
+        종목별 fast_info + info 조회보다는 훨씬 가볍다.
+        items: (정규화된 코드, 이름, 통화). 일봉 종가의 마지막 두 값을 현재가·전일 종가로 쓴다.
+        """
+        valid = []
+        for symbol, name, currency in items:
+            try:  # 손상된 코드 하나가 나머지 종목 조회까지 막지 않게 종목별로 확인
+                valid.append((normalize_symbol(symbol), name, currency))
+            except TradingError:
+                continue
+        items = valid
+        symbols = [symbol for symbol, _, _ in items]
+        if not symbols:
+            return {}
+        with _quiet_batch_failures():
+            frame = self._yf.download(
+                symbols, period="5d", progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS
+            )
+        closes = frame["Close"]
+        quotes = {}
+        for symbol, name, currency in items:
+            try:
+                series = closes[symbol] if hasattr(closes, "columns") else closes
+                values = [positive_decimal(float(v), "종가") for v in series.dropna().tolist()[-2:]]
+                price = normalize_price(currency, values[-1])
+                previous = normalize_price(currency, values[-2]) if len(values) == 2 else None
+            except Exception:
+                continue
+            quotes[symbol] = Quote(symbol, clean_name(name, symbol), price, currency, previous)
+        return quotes
+
+    def get_daily_closes(
+        self, symbols: list[str], start: date, *, include_usd_krw: bool
+    ) -> tuple[dict[str, dict[date, Decimal]], dict[date, Decimal]]:
+        """여러 종목(과 원/달러 환율)의 start 이후 일별 종가를 요청 한 번으로 받는다. 비정상 값은 버린다."""
+        tickers = [normalize_symbol(s) for s in symbols]
+        if include_usd_krw:
+            tickers.append(USD_KRW_SYMBOL)
+        if not tickers:
+            return {}, {}
+        with _quiet_batch_failures():
+            frame = self._yf.download(
+                tickers, start=start.isoformat(), progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS
+            )
+        closes_frame = frame["Close"]
+        result: dict[str, dict[date, Decimal]] = {}
+        for ticker in tickers:
+            try:
+                series = closes_frame[ticker] if hasattr(closes_frame, "columns") else closes_frame
+            except KeyError:
+                continue
+            daily: dict[date, Decimal] = {}
+            for index, value in series.dropna().items():
+                try:
+                    daily[index.date()] = positive_decimal(float(value), "종가")
+                except TradingError:
+                    continue
+            result[ticker] = daily
+        usd_krw = {}
+        for day, value in result.pop(USD_KRW_SYMBOL, {}).items():
+            rate = normalize_fx(value)
+            if USD_KRW_MIN <= rate <= USD_KRW_MAX:  # 주문 경로와 같은 범위로 이상값을 버린다
+                usd_krw[day] = rate
+        return result, usd_krw
 
     def get_history(self, symbol: str, period: str = "3mo") -> list[PricePoint]:
         if period not in HISTORY_PERIODS:

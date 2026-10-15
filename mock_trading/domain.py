@@ -18,6 +18,10 @@ USD_PRICE_UNIT = Decimal("0.0001")
 FX_UNIT = Decimal("0.01")
 MAX_NAME_LENGTH = 100
 
+# 원/달러 환율이 이 범위를 벗어나면 데이터 오류로 본다.
+USD_KRW_MIN = Decimal(500)
+USD_KRW_MAX = Decimal(3000)
+
 # 한 번에 주문할 수 있는 최대 수량. 비정상적으로 큰 입력이 계산을 망가뜨리지 않게 막는다.
 MAX_ORDER_QUANTITY = 1_000_000
 
@@ -30,6 +34,13 @@ class Currency(str, Enum):
 class Side(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
+
+
+class OrderStatus(str, Enum):
+    OPEN = "OPEN"            # 체결 대기
+    FILLED = "FILLED"        # 체결됨
+    CANCELLED = "CANCELLED"  # 사용자가 취소
+    REJECTED = "REJECTED"    # 조건은 맞았지만 현금·보유 수량 부족 등으로 체결하지 못함
 
 
 class TradingError(Exception):
@@ -126,6 +137,28 @@ class Trade:
     fx_rate: Decimal        # 1 종목통화 = fx_rate 원. 원화 종목은 1
     amount_krw: Decimal     # 수수료 제외 체결 금액 (원)
     fee_krw: Decimal
+
+
+@dataclass(frozen=True)
+class LimitOrder:
+    """지정가 주문. 매수는 현재가가 지정가 이하, 매도는 이상이 되면(두 번 연속 확인) 지정가로 체결한다."""
+    id: int
+    created_at: datetime
+    symbol: str
+    name: str
+    side: Side
+    quantity: int
+    limit_price: Decimal  # 종목 통화 기준
+    currency: Currency
+    status: OrderStatus
+    trade_id: int | None = None
+    note: str = ""
+    fx_at_order: Decimal | None = None  # 미국 주식: 주문할 때의 환율(체결 때 크게 다르면 보류)
+    armed: bool = False                 # 직전 확인에서 이미 조건이 맞았는지(두 번 연속 맞아야 체결)
+    armed_at: datetime | None = None    # 처음 조건이 맞은 시각(두 번째 확인은 최소 간격 뒤에만)
+
+    def is_triggered(self, price: Decimal) -> bool:
+        return price <= self.limit_price if self.side is Side.BUY else price >= self.limit_price
 
 
 @dataclass(frozen=True)

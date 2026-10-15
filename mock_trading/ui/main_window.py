@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import html
+from datetime import date
 from dataclasses import dataclass
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QDateTime, Qt, QTime, QTimer
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QGridLayout,
@@ -19,6 +20,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QComboBox,
+    QDoubleSpinBox,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -28,10 +31,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..broker import PRICE_SLIPPAGE_LIMIT, AccountSummary, Broker
-from ..domain import MAX_ORDER_QUANTITY, Position, Quote, Side, Trade, krw
+from ..broker import PRICE_SLIPPAGE_LIMIT, AccountSummary, Broker, OrderEvent
+from ..domain import MAX_ORDER_QUANTITY, Currency, LimitOrder, OrderStatus, Position, Quote, Side, Trade, krw
+from ..history import AssetPoint, DailyCloseCache, load_asset_history
 from ..market_data import PricePoint
+from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
+from .theme import style_axes, style_chart
 from .worker import Worker
 
 AUTO_REFRESH_MS = 60_000
@@ -46,6 +52,8 @@ class _QuoteView:
     max_buy: int
     held: int
     fx_rate: Decimal
+    watched: bool = False
+    pending_sell: int = 0
 
 
 @dataclass
@@ -61,6 +69,17 @@ def _plain_label(text: str) -> QLabel:
     label.setTextFormat(Qt.PlainText)
     label.setOpenExternalLinks(False)
     return label
+
+
+def _order_button_style(color: str) -> str:
+    # 배경색을 직접 지정하면 비활성 상태도 같은 색으로 보이므로 :disabled 모양을 따로 둔다.
+    return (
+        f"QPushButton {{ background: {color}; color: white; border-radius: 14px; padding: 12px;"
+        " font-size: 16px; font-weight: 700; border: 2px solid transparent; }"
+        # 빨강·파랑 위에서도 보이도록 포커스 테두리는 어두운 색
+        "QPushButton:focus { border: 2px solid #191F28; }"
+        "QPushButton:disabled { background: #E5E8EB; color: #8B95A1; }"
+    )
 
 
 def _confirm(parent: QWidget, title: str, text: str) -> bool:
@@ -86,12 +105,22 @@ def _item(text: str, *, align_right: bool = False, color: str = "") -> QTableWid
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, broker: Broker) -> None:
+    def __init__(self, broker: Broker, watchlist: Watchlist | None = None) -> None:
         super().__init__()
         self.broker = broker
+        self.watchlist = watchlist or Watchlist(broker.repo, broker.provider)
         self.worker = Worker()
         self.current: _QuoteView | None = None
         self._order_pending = False
+        self._reset_pending = False
+        self._watch_pending = False
+        self._watch_loading = False
+        self._portfolio_loading = False
+        self._history_loading = False
+        self._orders_checking = False
+        self._unseen_order_events = 0
+        self._order_notice: QMessageBox | None = None
+        self._history_cache = DailyCloseCache()
 
         self.setWindowTitle("모의투자")
         self.resize(1200, 780)
@@ -117,6 +146,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
 
         self.status = _plain_label("종목 코드를 입력하세요. 예) 005930(삼성전자), AAPL")
+        self.status.setObjectName("status")
         layout.addWidget(self.status)
         self.setCentralWidget(root)
 
@@ -128,9 +158,9 @@ class MainWindow(QMainWindow):
             [("total", "총자산"), ("cash", "현금"), ("stock", "주식 평가"), ("return", "총 수익률"), ("realized", "실현 손익")]
         ):
             caption = QLabel(title)
-            caption.setStyleSheet("color: gray;")
+            caption.setObjectName("caption")
             value = QLabel("-")
-            value.setStyleSheet("font-size: 18px; font-weight: 600;")
+            value.setObjectName("heroNumber" if key == "total" else "bigNumber")
             grid.addWidget(caption, 0, column)
             grid.addWidget(value, 1, column)
             self.summary_labels[key] = value
@@ -149,7 +179,10 @@ class MainWindow(QMainWindow):
 
     def _build_quote_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setObjectName("card")  # 흰 카드(theme.py)
+        panel.setAttribute(Qt.WA_StyledBackground, True)
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(20, 18, 20, 18)
 
         search = QHBoxLayout()
         self.symbol_input = QLineEdit()
@@ -163,40 +196,60 @@ class MainWindow(QMainWindow):
         layout.addLayout(search)
 
         self.name_label = _plain_label("-")
-        self.name_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+        self.name_label.setStyleSheet("font-size: 16px; font-weight: 600; color: #4E5968;")
         self.price_label = QLabel("-")
-        self.price_label.setStyleSheet("font-size: 26px; font-weight: 700;")
+        self.price_label.setStyleSheet("font-size: 32px; font-weight: 800;")
         self.change_label = QLabel("")
-        layout.addWidget(self.name_label)
+        name_row = QHBoxLayout()
+        name_row.addWidget(self.name_label, 1)
+        self.watch_button = QPushButton("☆ 관심")
+        self.watch_button.setCheckable(True)
+        self.watch_button.setEnabled(False)
+        self.watch_button.clicked.connect(self.toggle_watch)
+        name_row.addWidget(self.watch_button)
+        layout.addLayout(name_row)
         layout.addWidget(self.price_label)
         layout.addWidget(self.change_label)
 
         order = QGroupBox("주문")
+        order.setObjectName("flat")  # 카드 안의 묶음: 테두리·배경 없이
         form = QGridLayout(order)
         self.quantity = QSpinBox()
         self.quantity.setRange(1, MAX_ORDER_QUANTITY)
         self.quantity.valueChanged.connect(self._update_estimate)
         max_button = QPushButton("최대")
         max_button.clicked.connect(self._fill_max)
-        form.addWidget(QLabel("수량"), 0, 0)
-        form.addWidget(self.quantity, 0, 1)
-        form.addWidget(max_button, 0, 2)
+        self.order_type = QComboBox()
+        self.order_type.addItems(["시장가", "지정가"])
+        self.order_type.currentIndexChanged.connect(self._on_order_type_changed)
+        self.limit_price = QDoubleSpinBox()
+        self.limit_price.setRange(0, 1_000_000_000)
+        self.limit_price.setGroupSeparatorShown(True)
+        self.limit_price.setEnabled(False)
+        self.limit_price.valueChanged.connect(self._update_estimate)
+        self._limit_symbol: str | None = None
+        form.addWidget(QLabel("주문 방식"), 0, 0)
+        form.addWidget(self.order_type, 0, 1)
+        form.addWidget(self.limit_price, 0, 2)
+        form.addWidget(QLabel("수량"), 1, 0)
+        form.addWidget(self.quantity, 1, 1)
+        form.addWidget(max_button, 1, 2)
 
         self.estimate_label = QLabel("-")
         self.held_label = QLabel("-")
-        form.addWidget(QLabel("예상 금액"), 1, 0)
-        form.addWidget(self.estimate_label, 1, 1, 1, 2)
-        form.addWidget(QLabel("보유 / 최대 매수"), 2, 0)
-        form.addWidget(self.held_label, 2, 1, 1, 2)
+        form.addWidget(QLabel("예상 금액"), 2, 0)
+        form.addWidget(self.estimate_label, 2, 1, 1, 2)
+        form.addWidget(QLabel("보유 / 최대 매수"), 3, 0)
+        form.addWidget(self.held_label, 3, 1, 1, 2)
 
         self.buy_button = QPushButton("매수")
-        self.buy_button.setStyleSheet(f"background: {fmt.UP_COLOR}; color: white; padding: 8px; font-weight: 600;")
+        self.buy_button.setStyleSheet(_order_button_style(fmt.UP_COLOR))
         self.buy_button.clicked.connect(lambda: self.place_order(Side.BUY))
         self.sell_button = QPushButton("매도")
-        self.sell_button.setStyleSheet(f"background: {fmt.DOWN_COLOR}; color: white; padding: 8px; font-weight: 600;")
+        self.sell_button.setStyleSheet(_order_button_style(fmt.DOWN_COLOR))
         self.sell_button.clicked.connect(lambda: self.place_order(Side.SELL))
-        form.addWidget(self.buy_button, 3, 0, 1, 2)
-        form.addWidget(self.sell_button, 3, 2)
+        form.addWidget(self.buy_button, 4, 0, 1, 2)
+        form.addWidget(self.sell_button, 4, 2)
         layout.addWidget(order)
         layout.addStretch(1)
 
@@ -205,6 +258,7 @@ class MainWindow(QMainWindow):
 
     def _build_chart(self) -> QWidget:
         self.chart = QChart()
+        style_chart(self.chart)
         self.chart.legend().hide()
         self.chart.setTitle("최근 3개월 종가")
         view = QChartView(self.chart)
@@ -214,10 +268,50 @@ class MainWindow(QMainWindow):
     def _build_tables(self) -> QWidget:
         tabs = QTabWidget()
         self.holdings_table = self._table(["종목", "코드", "수량", "평균 매입가", "현재가", "평가 금액", "평가 손익", "수익률"])
-        self.holdings_table.cellDoubleClicked.connect(self._open_holding)
+        # 더블클릭과 Enter 모두로 연다
+        self.holdings_table.itemActivated.connect(lambda item: self._open_holding(item.row(), item.column()))
         self.trades_table = self._table(["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료"])
+        self.watch_table = self._table(["종목", "코드", "현재가", "전일 대비"])
+        self.watch_table.itemActivated.connect(lambda item: self._open_watch(item.row(), item.column()))
+        QShortcut(QKeySequence.Delete, self.watch_table, self._remove_selected_watch, context=Qt.WidgetShortcut)
+        watch_tab = self.watch_tab = QWidget()
+        watch_layout = QVBoxLayout(watch_tab)
+        watch_layout.setContentsMargins(0, 0, 0, 0)
+        watch_layout.addWidget(self.watch_table, 1)
+        remove = QPushButton("선택한 종목 빼기 (Delete)")
+        remove.clicked.connect(self._remove_selected_watch)
+        watch_layout.addWidget(remove, 0, Qt.AlignRight)
         tabs.addTab(self.holdings_table, "보유 종목")
         tabs.addTab(self.trades_table, "거래 내역")
+        tabs.addTab(watch_tab, "관심 종목")
+
+        history_tab = self.history_tab = QWidget()
+        history_layout = QVBoxLayout(history_tab)
+        history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_label = _plain_label("-")
+        history_layout.addWidget(self.history_label)
+        self.history_chart = QChart()
+        style_chart(self.history_chart)
+        self.history_chart.setTitle("날짜별 총자산")
+        history_view = QChartView(self.history_chart)
+        history_view.setRenderHint(QPainter.Antialiasing)
+        history_layout.addWidget(history_view, 1)
+        tabs.addTab(history_tab, "자산 추이")
+
+        orders_tab = self.orders_tab = QWidget()
+        orders_layout = QVBoxLayout(orders_tab)
+        orders_layout.setContentsMargins(0, 0, 0, 0)
+        self.orders_table = self._table(["번호", "주문 시각", "구분", "종목", "수량", "지정가", "상태", "비고"])
+        QShortcut(QKeySequence.Delete, self.orders_table, self._cancel_selected_orders, context=Qt.WidgetShortcut)
+        orders_layout.addWidget(self.orders_table, 1)
+        cancel = QPushButton("선택한 대기 주문 취소 (Delete)")
+        cancel.clicked.connect(self._cancel_selected_orders)
+        orders_layout.addWidget(cancel, 0, Qt.AlignRight)
+        tabs.addTab(orders_tab, "지정가 주문")
+
+        tabs.currentChanged.connect(lambda _: self._load_visible_tab())
+        tabs.currentChanged.connect(lambda _: self.tabs.currentWidget() is self.orders_tab and self._clear_order_badge())
+        self.tabs = tabs
         return tabs
 
     @staticmethod
@@ -227,6 +321,8 @@ class MainWindow(QMainWindow):
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.verticalHeader().hide()
+        table.verticalHeader().setDefaultSectionSize(44)
+        table.setShowGrid(False)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         return table
 
@@ -260,8 +356,8 @@ class MainWindow(QMainWindow):
                 _warn(self, title, str(error))
 
     def reset_account(self) -> None:
-        if self._order_pending:
-            self.status.setText("주문을 처리하는 중에는 계좌를 초기화할 수 없습니다.")
+        if self._order_pending or self._reset_pending:
+            self.status.setText("주문이나 초기화를 처리하는 중에는 계좌를 초기화할 수 없습니다.")
             return
         if not _confirm(self, "계좌 초기화", "보유 종목과 거래 내역이 모두 삭제됩니다. 계속할까요?"):
             return
@@ -274,26 +370,64 @@ class MainWindow(QMainWindow):
 
         # 초기화도 작업 스레드 대기열에 넣는다. 앞서 들어간 작업(시세 조회 등)이 모두 끝난 뒤 실행되고,
         # 그 결과가 초기화 뒤에 화면을 이전 계좌 상태로 되돌리지 않도록 current를 초기화 완료 시점에 비운다.
+        symbol = self.current.quote.symbol if self.current else None
+
         def done(_: object) -> None:
+            self._reset_pending = False
             self.current = None
             self._set_order_enabled(False)
             self.status.setText(f"계좌를 {fmt.won(Decimal(amount))}으로 초기화했습니다.")
             self.refresh_all()
+            if symbol:
+                # 시세 패널의 "보유 N주 / 최대 M주"가 이전 계좌 값으로 남지 않게 새 계좌 기준으로 다시 불러온다.
+                self.load_quote(symbol)
 
-        self.worker.run(lambda: self.broker.open_account(amount), done, lambda m: _warn(self, "계좌 초기화", m))
+        def failed(message: str) -> None:
+            self._reset_pending = False
+            self._set_order_enabled(True)
+            _warn(self, "계좌 초기화", message)
+
+        # 초기화가 끝날 때까지 주문 버튼을 끈다. 그 사이 도착하는 시세 결과도 버튼을 다시 켜지 못한다.
+        self._reset_pending = True
+        self._set_order_enabled(False)
+        self.status.setText("계좌를 초기화하는 중...")
+        self.worker.run(lambda: self.broker.open_account(amount), done, failed)
 
     # ------------------------------------------------------------------ 데이터 불러오기
     def refresh_all(self) -> None:
+        self.check_limit_orders()  # 체결이 계좌 갱신에 바로 반영되도록 맨 앞에
         self.load_portfolio()
         if self.current:
             self.load_quote(self.current.quote.symbol)
+        self.load_orders()
+        # 관심 종목·자산 추이는 가장 덜 급하므로 맨 뒤에, 탭이 보일 때만.
+        self._load_visible_tab()
+
+    def _load_visible_tab(self) -> None:
+        current = self.tabs.currentWidget()
+        if current is self.watch_tab:
+            self.load_watchlist()
+        elif current is self.history_tab:
+            self.load_asset_history()
 
     def load_portfolio(self) -> None:
+        if self._portfolio_loading:  # 직전 갱신이 아직 대기열에 있으면 또 넣지 않는다(느린 네트워크에서 쌓임 방지)
+            return
+        self._portfolio_loading = True
+
         def job() -> _PortfolioView:
             positions = self.broker.positions()
             return _PortfolioView(self.broker.summary(positions), positions, self.broker.repo.trades())
 
-        self.worker.run(job, self._show_portfolio, self._show_error)
+        def done(view: _PortfolioView) -> None:
+            self._portfolio_loading = False
+            self._show_portfolio(view)
+
+        def failed(message: str) -> None:
+            self._portfolio_loading = False
+            self._show_error(message)
+
+        self.worker.run(job, done, failed)
 
     def load_quote(self, symbol: str | None = None) -> None:
         symbol = symbol or self.symbol_input.text()
@@ -307,14 +441,349 @@ class MainWindow(QMainWindow):
             fx_rate = self.broker.fx_rate_for(quote.currency)
             held = self.broker.repo.holdings().get(quote.symbol)
             return _QuoteView(
-                quote, history, self.broker.max_buy_quantity(quote), held.quantity if held else 0, fx_rate
+                quote,
+                history,
+                self.broker.max_buy_quantity(quote),
+                held.quantity if held else 0,
+                fx_rate,
+                self.watchlist.contains(quote.symbol),
+                self.broker.pending_sell_quantity(quote.symbol),
             )
 
         self.worker.run(job, self._show_quote, self._show_error)
 
+    # ------------------------------------------------------------------ 자산 추이
+    def load_asset_history(self) -> None:
+        if self._history_loading:
+            return
+        self._history_loading = True
+
+        def job() -> list[AssetPoint]:
+            return load_asset_history(self.broker.repo, self.broker.provider, date.today(), self._history_cache)
+
+        def done(points: list[AssetPoint]) -> None:
+            self._history_loading = False
+            self._show_asset_history(points)
+
+        def failed(message: str) -> None:
+            self._history_loading = False
+            self._show_error(message)
+
+        self.worker.run(job, done, failed)
+
+    def _show_asset_history(self, points: list[AssetPoint]) -> None:
+        chart = self.history_chart
+        chart.removeAllSeries()
+        for axis in chart.axes():
+            chart.removeAxis(axis)
+        if not points:
+            self.history_label.setText("-")
+            return
+
+        total = QLineSeries()
+        total.setName("총자산")
+        last = points[-1]
+        total.setColor(QColor(fmt.color_for(last.return_rate) or "#495057"))
+        principal = QLineSeries()
+        principal.setName("기초 자금")
+        pen = QPen(QColor("#adb5bd"))
+        pen.setStyle(Qt.DashLine)
+        principal.setPen(pen)
+        if len(points) < 2:
+            total.setPointsVisible(True)  # 오늘 연 계좌는 점이 하나라 선이 그려지지 않는다
+        values = []
+        for point in points:
+            x = QDateTime(point.day, QTime(0, 0)).toMSecsSinceEpoch()
+            # 원 단위는 축 숫자가 너무 길어서 만원 단위로 그린다
+            total.append(x, float(point.total) / 10_000)
+            principal.append(x, float(point.initial_cash) / 10_000)
+            values += [float(point.total) / 10_000, float(point.initial_cash) / 10_000]
+        chart.addSeries(principal)
+        chart.addSeries(total)
+
+        x_axis = QDateTimeAxis()
+        span = (points[-1].day - points[0].day).days
+        x_axis.setFormat("yy/MM/dd" if span > 365 else "MM/dd")  # 1년이 넘으면 연도까지
+        first = QDateTime(points[0].day, QTime(0, 0))
+        x_axis.setRange(first.addDays(-1), QDateTime(points[-1].day, QTime(0, 0)).addDays(1))
+        y_axis = QValueAxis()
+        # 변동이 1만원 남짓인 평평한 구간에서는 눈금이 같은 숫자로 찍히지 않게 소수 한 자리까지
+        # (라벨 형식 문자열에는 한글을 쓸 수 없어 단위는 축 제목으로)
+        y_axis.setLabelFormat("%.1f" if max(values) - min(values) < 10 else "%.0f")
+        y_axis.setTitleText("만원")
+        padding = (max(values) - min(values)) * 0.1 or max(values) * 0.01 or 1
+        y_axis.setRange(min(values) - padding, max(values) + padding)
+        chart.addAxis(x_axis, Qt.AlignBottom)
+        chart.addAxis(y_axis, Qt.AlignLeft)
+        for series in (principal, total):
+            series.attachAxis(x_axis)
+            series.attachAxis(y_axis)
+        style_axes(chart)
+
+        # 최고·최저는 그날 종가로 평가한 날만으로 계산한다(대신 쓴 체결가가 튀는 값을 만들지 않게).
+        priced = [p for p in points if not p.missing_price] or points
+        best = max(priced, key=lambda p: p.total)
+        worst = min(priced, key=lambda p: p.total)
+        note = "  · 종가가 없는 날은 마지막 체결가로 계산" if any(p.missing_price for p in points) else ""
+        self.history_label.setText(
+            f"{points[0].day:%Y-%m-%d} ~ {last.day:%Y-%m-%d}  |  현재 {fmt.won(last.total)} ({fmt.percent(last.return_rate)})"
+            f"  |  최고 {fmt.won(best.total)} ({best.day:%m/%d})  ·  최저 {fmt.won(worst.total)} ({worst.day:%m/%d}){note}"
+        )
+        self.history_label.setStyleSheet(f"color: {fmt.color_for(last.return_rate)};")
+
+    # ------------------------------------------------------------------ 관심 종목
+    def load_watchlist(self) -> None:
+        if self._watch_loading:  # 직전 갱신이 아직 대기열에 있으면 또 넣지 않는다
+            return
+        self._watch_loading = True
+
+        def done(rows: list[WatchRow]) -> None:
+            self._watch_loading = False
+            self._show_watchlist(rows)
+
+        def failed(message: str) -> None:
+            self._watch_loading = False
+            self._show_error(message)
+
+        self.worker.run(self.watchlist.rows, done, failed)
+
+    def toggle_watch(self) -> None:
+        if not self.current:
+            return
+        if self._watch_pending:
+            return
+        symbol = self.current.quote.symbol
+        adding = not self.current.watched
+        self._watch_pending = True
+        self.watch_button.setEnabled(False)
+
+        def job() -> bool:
+            if adding:
+                self.watchlist.add(symbol)
+            else:
+                self.watchlist.remove(symbol)
+            return adding
+
+        def done(added: bool) -> None:
+            self._watch_pending = False
+            if self.current and self.current.quote.symbol == symbol:
+                self.current.watched = added
+                self._show_watch_state()
+            self.status.setText(f"{symbol}을(를) 관심 종목에 {'담았습니다' if added else '뺐습니다'}.")
+            self.load_watchlist()
+
+        def failed(message: str) -> None:
+            self._watch_pending = False
+            self._show_watch_state()
+            _warn(self, "관심 종목", message)
+
+        self.worker.run(job, done, failed)
+
+    def _remove_selected_watch(self) -> None:
+        rows = sorted({index.row() for index in self.watch_table.selectedIndexes()})
+        symbols = [self.watch_table.item(row, 1).text() for row in rows]
+        if not symbols:
+            self.status.setText("뺄 종목을 표에서 선택하세요.")
+            return
+
+        def job() -> list[str]:
+            for symbol in symbols:
+                self.watchlist.remove(symbol)
+            return symbols
+
+        def done(removed: list[str]) -> None:
+            if self.current and self.current.quote.symbol in removed:
+                self.current.watched = False
+                self._show_watch_state()
+            self.status.setText(f"관심 종목에서 {len(removed)}개를 뺐습니다.")
+            self.load_watchlist()
+
+        self.worker.run(job, done, self._show_error)
+
+    def _open_watch(self, row: int, _column: int) -> None:
+        symbol = self.watch_table.item(row, 1).text()
+        self.symbol_input.setText(symbol)
+        self.load_quote(symbol)
+
+    def _show_watch_state(self) -> None:
+        watched = bool(self.current and self.current.watched)
+        self.watch_button.setEnabled(self.current is not None and not self._watch_pending)
+        self.watch_button.setChecked(watched)
+        self.watch_button.setText("★ 관심" if watched else "☆ 관심")
+
+    def _show_watchlist(self, rows: list[WatchRow]) -> None:
+        self.watch_table.setRowCount(len(rows))
+        for row, entry in enumerate(rows):
+            item, quote = entry.item, entry.quote
+            change = quote.change_rate if quote else None
+            color = fmt.color_for(change)
+            values = [
+                _item(item.name),
+                _item(item.symbol),
+                _item(fmt.price(quote.price, quote.currency) if quote else "시세 없음", align_right=True),
+                _item(fmt.percent(change), align_right=True, color=color),
+            ]
+            for column, cell in enumerate(values):
+                self.watch_table.setItem(row, column, cell)
+
+    # ------------------------------------------------------------------ 지정가 주문
+    def _is_limit(self) -> bool:
+        return self.order_type.currentIndex() == 1
+
+    def _on_order_type_changed(self) -> None:
+        self.limit_price.setEnabled(self._is_limit())
+        self._update_estimate()
+        self._set_order_enabled(True)
+
+    def check_limit_orders(self) -> None:
+        if self._orders_checking:
+            return
+        self._orders_checking = True
+
+        def done(events: list[OrderEvent]) -> None:
+            self._orders_checking = False
+            self.load_orders()  # "확인 1회" 표시도 바로 보이게
+            if events:
+                self._notify_order_events(events)
+                self.load_portfolio()
+
+        def failed(message: str) -> None:
+            self._orders_checking = False
+            self._show_error(message)
+
+        self.worker.run(self.broker.check_limit_orders, done, failed)
+
+    def _notify_order_events(self, events: list[OrderEvent]) -> None:
+        """백그라운드에서 일어난 체결·거부를 놓치지 않게: 막지 않는 알림 창과 탭 제목의 건수."""
+        lines = [self._describe_event(e) for e in events]
+        if self._order_notice is None:
+            self._order_notice = QMessageBox(QMessageBox.Information, "지정가 주문", "", QMessageBox.Ok, self)
+            self._order_notice.setTextFormat(Qt.PlainText)
+            self._order_notice.setModal(False)
+            self._order_notice.finished.connect(lambda _: self._order_notice.setText(""))  # 닫으면 비운다
+        previous = self._order_notice.text() if self._order_notice.isVisible() else ""
+        # 아직 안 본 앞선 알림은 지우지 않고 이어 붙인다
+        self._order_notice.setText("\n".join([previous, *lines]) if previous else "\n".join(lines))
+        self._order_notice.show()
+        if self.tabs.currentWidget() is not self.orders_tab:
+            self._unseen_order_events += len(events)
+            self.tabs.setTabText(self.tabs.indexOf(self.orders_tab), f"지정가 주문 ({self._unseen_order_events})")
+
+    def _clear_order_badge(self) -> None:
+        self._unseen_order_events = 0
+        self.tabs.setTabText(self.tabs.indexOf(self.orders_tab), "지정가 주문")
+
+    @staticmethod
+    def _describe_event(event: OrderEvent) -> str:
+        order, verb = event.order, "매수" if event.order.side is Side.BUY else "매도"
+        if event.trade:
+            return f"지정가 {verb} 체결: {order.name} {order.quantity:,}주 @ {fmt.price(event.trade.price, order.currency)}"
+        return f"지정가 {verb} 거부: {order.name} — {event.note}"
+
+    def load_orders(self) -> None:
+        self.worker.run(lambda: self.broker.repo.orders(), self._show_orders, self._show_error)
+
+    def _show_orders(self, orders: list[LimitOrder]) -> None:
+        labels = {
+            OrderStatus.OPEN: ("대기", ""),
+            OrderStatus.FILLED: ("체결", fmt.UP_COLOR),
+            OrderStatus.CANCELLED: ("취소", "#868e96"),
+            OrderStatus.REJECTED: ("거부", fmt.DOWN_COLOR),
+        }
+        self.orders_table.setRowCount(len(orders))
+        for row, order in enumerate(orders):
+            status, color = labels[order.status]
+            if order.status is OrderStatus.OPEN and order.armed:
+                status = "대기 (확인 1회)"  # 다음 확인에서도 조건이 맞으면 체결
+            buy = order.side is Side.BUY
+            values = [
+                _item(str(order.id), align_right=True),
+                _item(order.created_at.strftime("%Y-%m-%d %H:%M")),
+                _item("매수" if buy else "매도", color=fmt.UP_COLOR if buy else fmt.DOWN_COLOR),
+                _item(f"{order.name} ({order.symbol})"),
+                _item(f"{order.quantity:,}", align_right=True),
+                _item(fmt.price(order.limit_price, order.currency), align_right=True),
+                _item(status, color=color),
+                _item(order.note),
+            ]
+            for column, cell in enumerate(values):
+                self.orders_table.setItem(row, column, cell)
+
+    def _cancel_selected_orders(self) -> None:
+        rows = sorted({index.row() for index in self.orders_table.selectedIndexes()})
+        ids = [int(self.orders_table.item(row, 0).text()) for row in rows]
+        if not ids:
+            self.status.setText("취소할 주문을 표에서 선택하세요.")
+            return
+        # Delete 키 하나로 되돌릴 수 없는 취소가 일어나지 않게 확인한다(관심 종목 빼기는 다시 담으면 되니 확인 없음).
+        if not _confirm(self, "대기 주문 취소", f"선택한 대기 주문 {len(ids)}건을 취소할까요?"):
+            return
+
+        def job() -> int:
+            return sum(1 for order_id in ids if self.broker.cancel_order(order_id))
+
+        def done(count: int) -> None:
+            self.status.setText(f"대기 주문 {count}건을 취소했습니다." if count else "취소할 수 있는 대기 주문이 없습니다.")
+            self.load_orders()
+
+        self.worker.run(job, done, self._show_error)
+
+    def _place_limit_order(self, side: Side) -> None:
+        quote = self.current.quote
+        quantity = self.quantity.value()
+        limit = Decimal(str(round(self.limit_price.value(), self.limit_price.decimals())))
+        verb = "매수" if side is Side.BUY else "매도"
+        condition = "이하로 내려가면" if side is Side.BUY else "이상으로 오르면"
+        amount, fee = self._estimate(side)
+        message = (
+            f"{quote.name} ({quote.symbol})\n"
+            f"현재가 {fmt.price(quote.price, quote.currency)}\n\n"
+            f"가격이 {fmt.price(limit, quote.currency)} {condition} {quantity:,}주를 지정가로 {verb}합니다.\n"
+            f"예상 금액: {fmt.won(amount)} (수수료·세금 약 {fmt.won(fee)})\n"
+            + (f"적용 환율: {self.current.fx_rate:,}원/달러 (주문 기준값으로 저장)\n" if quote.currency is Currency.USD else "")
+            + "\n앱이 켜져 있는 동안 1분마다 확인하고, 약 1분 간격으로 두 번 연속 조건이 맞을 때 체결합니다.\n"
+            "취소할 때까지 유지되며, 체결할 때 현금이나 보유 수량이 부족하면 거부됩니다."
+            + ("\n미국 주식은 체결 때 환율이 주문 때보다 10% 넘게 다르면 체결을 미룹니다." if quote.currency is Currency.USD else "")
+        )
+        worse = (side is Side.BUY and limit > quote.price) or (side is Side.SELL and limit < quote.price)
+        if worse:
+            gap = abs(limit - quote.price) / quote.price * 100
+            direction = "높은" if side is Side.BUY else "낮은"
+            message = (
+                f"주의: 지정가가 현재가보다 {gap:.1f}% {direction} 가격이라, 곧 지정가로 {verb}하게 됩니다"
+                f"(현재가보다 불리).\n\n" + message
+            )
+        if not _confirm(self, f"지정가 {verb} 확인", message):
+            return
+        self._order_pending = True
+        self._set_order_enabled(False)
+
+        def done(order: LimitOrder) -> None:
+            self._order_pending = False
+            self._set_order_enabled(True)
+            self.status.setText(f"지정가 {verb} 주문 #{order.id}을(를) 걸어 두었습니다.")
+            self.refresh_all()  # 이미 조건이 맞으면 바로 체결된다
+
+        def failed(message: str) -> None:
+            self._order_pending = False
+            self._set_order_enabled(True)
+            _warn(self, f"지정가 {verb} 실패", message)
+
+        expected_price, expected_fx = quote.price, self.current.fx_rate
+        self.worker.run(
+            lambda: self.broker.place_limit_order(
+                side, quote.symbol, quantity, limit, expected_price=expected_price, expected_fx=expected_fx
+            ),
+            done,
+            failed,
+        )
+
     # ------------------------------------------------------------------ 주문
     def place_order(self, side: Side) -> None:
-        if not self.current or self._order_pending:
+        if not self.current or self._order_pending or self._reset_pending:
+            return
+        if self._is_limit():
+            self._place_limit_order(side)
             return
         quote = self.current.quote
         quantity = self.quantity.value()
@@ -327,6 +796,8 @@ class MainWindow(QMainWindow):
             f"예상 수수료·세금: {fmt.won(fee)}\n"
             + (f"적용 환율: {self.current.fx_rate:,}원/달러\n" if quote.currency.value == "USD" else "")
             + f"가격이나 환율이 {PRICE_SLIPPAGE_LIMIT}% 넘게 바뀌면 체결하지 않습니다."
+            + (f"\n\n대기 중인 지정가 판매 {self.current.pending_sell:,}주가 있습니다. 지금 팔면 그 주문은 체결 때 거부될 수 있습니다."
+               if side is Side.SELL and self.current.pending_sell else "")
         )
         if not _confirm(self, f"{verb} 확인", message):
             return
@@ -349,12 +820,15 @@ class MainWindow(QMainWindow):
             _warn(self, f"{verb} 실패", message)
             self.refresh_all()
 
-        self.worker.run(lambda: action(quote.symbol, quantity, expected_price, expected_fx), done, failed)
+        self.worker.run(
+            lambda: action(quote.symbol, quantity, expected_price=expected_price, expected_fx=expected_fx), done, failed
+        )
 
     def _estimate(self, side: Side) -> tuple[Decimal, Decimal]:
         """화면과 확인창에 보여줄 원화 금액과 수수료. 실제 체결과 같은 규칙(broker.fees)으로 계산한다."""
         view = self.current
-        amount = krw(view.quote.price * view.fx_rate * self.quantity.value())
+        price = Decimal(str(self.limit_price.value())) if self._is_limit() else view.quote.price
+        amount = krw(price * view.fx_rate * self.quantity.value())
         return amount, self.broker.fees.fee(side, view.quote.currency, amount)
 
     def _fill_max(self) -> None:
@@ -370,13 +844,15 @@ class MainWindow(QMainWindow):
             self.estimate_label.setText("-")
             return
         amount, fee = self._estimate(Side.BUY)
-        self.estimate_label.setText(f"{fmt.won(amount + fee)} (매수 수수료 포함)")
+        basis = "지정가 기준, " if self._is_limit() else ""
+        self.estimate_label.setText(f"{fmt.won(amount + fee)} ({basis}매수 수수료 포함)")
 
     def _set_order_enabled(self, enabled: bool) -> None:
         """주문이 진행 중이면 다른 작업 결과가 먼저 도착해도 버튼을 켜지 않는다(중복 주문 방지)."""
         view = self.current
-        enabled = enabled and view is not None and not self._order_pending
-        self.buy_button.setEnabled(enabled and view.max_buy > 0)
+        enabled = enabled and view is not None and not self._order_pending and not self._reset_pending
+        # 지정가 매수는 지금 현금으로 살 수 있는지 주문할 때 따로 확인하므로 최대 수량과 무관하게 켠다.
+        self.buy_button.setEnabled(enabled and (view.max_buy > 0 or self._is_limit()))
         self.sell_button.setEnabled(enabled and view.held > 0)
 
     def _open_holding(self, row: int, _column: int) -> None:
@@ -398,8 +874,16 @@ class MainWindow(QMainWindow):
         self.change_label.setText(f"전일 대비 {fmt.percent(change)}")
         self.change_label.setStyleSheet(f"color: {fmt.color_for(change)};")
         self.held_label.setText(f"{view.held:,}주 / {view.max_buy:,}주")
+        if self._limit_symbol != quote.symbol:  # 같은 종목을 갱신할 때는 사용자가 입력한 지정가를 유지
+            self._limit_symbol = quote.symbol
+            if quote.currency is Currency.KRW:
+                self.limit_price.setDecimals(0)
+            else:
+                self.limit_price.setDecimals(4 if quote.price < 1 else 2)  # 1달러 미만은 0.00으로 반올림되지 않게
+            self.limit_price.setValue(float(quote.price))
         self._update_estimate()
         self._set_order_enabled(True)
+        self._show_watch_state()
         self._draw_chart(quote, view.history)
         self.status.setText(f"{quote.symbol} 시세 갱신 완료 (무료 시세는 최대 약 15분 지연될 수 있습니다)")
 
@@ -427,6 +911,7 @@ class MainWindow(QMainWindow):
         self.chart.addAxis(y_axis, Qt.AlignLeft)
         series.attachAxis(x_axis)
         series.attachAxis(y_axis)
+        style_axes(self.chart)
         self.chart.setTitle(html.escape(f"{quote.name} 최근 3개월 종가"))  # QChart 제목은 HTML을 해석한다
 
     def _show_portfolio(self, view: _PortfolioView) -> None:
@@ -436,9 +921,7 @@ class MainWindow(QMainWindow):
         self.summary_labels["stock"].setText(fmt.won(summary.stock_value))
         rate = summary.total_return_rate
         self.summary_labels["return"].setText(fmt.percent(rate))
-        self.summary_labels["return"].setStyleSheet(
-            f"font-size: 18px; font-weight: 600; color: {fmt.color_for(rate)};"
-        )
+        self.summary_labels["return"].setStyleSheet(f"color: {fmt.color_for(rate)};")
         self.summary_labels["realized"].setText(fmt.signed_won(summary.realized_profit))
 
         self.holdings_table.setRowCount(len(view.positions))

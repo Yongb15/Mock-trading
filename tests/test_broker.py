@@ -2,6 +2,7 @@ from decimal import Decimal
 
 import pytest
 
+from tests.helpers import AutoConfirmBroker
 from mock_trading.broker import Broker, FeePolicy
 from mock_trading.domain import Currency, Quote, Side, TradingError
 from mock_trading.market_data import normalize_symbol
@@ -37,7 +38,7 @@ def provider():
 
 @pytest.fixture
 def broker(provider):
-    b = Broker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
+    b = AutoConfirmBroker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
     b.open_account(10_000_000)
     return b
 
@@ -116,7 +117,7 @@ def test_summary_values_positions(broker, provider):
 
 @pytest.mark.parametrize("amount", [0, -5, "abc", "1.5", 99_999, 10**12, "NaN"])
 def test_rejects_invalid_initial_cash(amount):
-    broker = Broker(Repository(), FakeProvider())
+    broker = AutoConfirmBroker(Repository(), FakeProvider())
     with pytest.raises(TradingError):
         broker.open_account(amount)
 

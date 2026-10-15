@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+from tests.helpers import AutoConfirmBroker
 from mock_trading.broker import Broker, FeePolicy
 from mock_trading.domain import Currency, Quote, TradingError
 from mock_trading.storage import Repository
@@ -17,7 +18,7 @@ def provider():
 
 @pytest.fixture
 def broker(provider):
-    b = Broker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
+    b = AutoConfirmBroker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
     b.open_account(10_000_000)
     return b
 

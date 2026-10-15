@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+from tests.helpers import AutoConfirmBroker
 from mock_trading.broker import Broker, FeePolicy
 from mock_trading.domain import Currency, Quote, TradingError
 from mock_trading.storage import LedgerError, Repository
@@ -19,7 +20,7 @@ def provider():
 
 @pytest.fixture
 def broker(provider):
-    b = Broker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
+    b = AutoConfirmBroker(Repository(), provider, FeePolicy(commission_rate=Decimal("0.001"), kr_sell_tax_rate=Decimal("0.002")))
     b.open_account(10_000_000)
     return b
 
@@ -83,7 +84,7 @@ def test_fx_failure_keeps_krw_positions_priced(broker, provider):
 def test_positions_without_account_is_trading_error(provider):
     """QA U2"""
     with pytest.raises(TradingError, match="계좌"):
-        Broker(Repository(), provider).positions()
+        AutoConfirmBroker(Repository(), provider).positions()
 
 
 def test_max_buy_with_zero_price_returns_zero(broker):
@@ -126,7 +127,7 @@ def test_schema_rejects_text_quantity():
 def test_repository_serializes_threads(tmp_path, provider):
     """Security N2 / QA U4: 두 스레드가 같은 연결로 동시에 주문·초기화해도 트랜잭션이 겹치지 않는다."""
     repo = Repository(tmp_path / "t.db", check_same_thread=False)
-    broker = Broker(repo, provider)
+    broker = AutoConfirmBroker(repo, provider)
     broker.open_account(100_000_000)
     errors: list[BaseException] = []
 
