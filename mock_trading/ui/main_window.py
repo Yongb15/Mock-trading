@@ -106,6 +106,7 @@ class MainWindow(QMainWindow):
         self._reset_pending = False
         self._watch_pending = False
         self._watch_loading = False
+        self._portfolio_loading = False
 
         self.setWindowTitle("모의투자")
         self.resize(1200, 780)
@@ -340,11 +341,23 @@ class MainWindow(QMainWindow):
             self.load_watchlist()
 
     def load_portfolio(self) -> None:
+        if self._portfolio_loading:  # 직전 갱신이 아직 대기열에 있으면 또 넣지 않는다(느린 네트워크에서 쌓임 방지)
+            return
+        self._portfolio_loading = True
+
         def job() -> _PortfolioView:
             positions = self.broker.positions()
             return _PortfolioView(self.broker.summary(positions), positions, self.broker.repo.trades())
 
-        self.worker.run(job, self._show_portfolio, self._show_error)
+        def done(view: _PortfolioView) -> None:
+            self._portfolio_loading = False
+            self._show_portfolio(view)
+
+        def failed(message: str) -> None:
+            self._portfolio_loading = False
+            self._show_error(message)
+
+        self.worker.run(job, done, failed)
 
     def load_quote(self, symbol: str | None = None) -> None:
         symbol = symbol or self.symbol_input.text()

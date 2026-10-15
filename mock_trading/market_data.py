@@ -7,6 +7,7 @@ QuoteProvider 인터페이스 뒤에 yfinance를 숨겨, 테스트에서는 가�
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,6 +25,9 @@ from .domain import (
 )
 
 USD_KRW_SYMBOL = "KRW=X"
+
+# yfinance는 실패한 종목을 stderr에 직접 출력한다. 실패는 결과에서 빠지는 것으로 충분히 드러나므로 조용히 둔다.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 HISTORY_PERIODS = frozenset({"1mo", "3mo", "6mo", "1y", "5y"})
 
 # 허용하는 종목 코드 형태. 임의 문자열이 외부 API 요청으로 그대로 나가지 않게 한다.
@@ -122,14 +126,23 @@ class YFinanceProvider:
         return normalize_fx(positive_decimal(self._yf.Ticker(USD_KRW_SYMBOL).fast_info.last_price, "환율"))
 
     def get_quotes(self, items: list[tuple[str, str, Currency]]) -> dict[str, Quote]:
-        """관심 종목처럼 여러 종목을 요청 한 번으로 조회한다. 실패한 종목은 결과에서 빠진다.
+        """관심 종목처럼 여러 종목을 한 번의 호출로 조회한다. 실패한 종목은 결과에서 빠진다.
 
+        yfinance는 내부적으로 종목마다 요청을 보내므로(threads=True면 병렬) 종목 수만큼 요청이 나간다.
+        종목별 fast_info + info 조회보다는 훨씬 가볍다.
         items: (정규화된 코드, 이름, 통화). 일봉 종가의 마지막 두 값을 현재가·전일 종가로 쓴다.
         """
-        symbols = [normalize_symbol(symbol) for symbol, _, _ in items]
+        valid = []
+        for symbol, name, currency in items:
+            try:  # 손상된 코드 하나가 나머지 종목 조회까지 막지 않게 종목별로 확인
+                valid.append((normalize_symbol(symbol), name, currency))
+            except TradingError:
+                continue
+        items = valid
+        symbols = [symbol for symbol, _, _ in items]
         if not symbols:
             return {}
-        frame = self._yf.download(symbols, period="5d", progress=False, auto_adjust=False, threads=False)
+        frame = self._yf.download(symbols, period="5d", progress=False, auto_adjust=False, threads=True)
         closes = frame["Close"]
         quotes = {}
         for symbol, name, currency in items:

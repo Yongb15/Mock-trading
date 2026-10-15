@@ -216,3 +216,42 @@ def test_window_skips_duplicate_watch_refresh_and_only_refreshes_visible_tab(pro
     app.processEvents()
     assert not window.watch_button.isEnabled()      # 담기·빼기 처리 중에는 다시 켜지지 않음
     window.close()
+
+
+def test_null_symbol_row_is_purged_and_does_not_block_others(tmp_path, provider):
+    """Mock_Sequrity F2: symbol이 NULL인 행도 정리되고, 손상된 코드 하나가 나머지 시세를 막지 않는다."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)  # 이전 스키마(NOT NULL 없음)
+    conn.execute("CREATE TABLE watchlist (symbol TEXT PRIMARY KEY, name TEXT NOT NULL, currency TEXT NOT NULL, added_at TEXT NOT NULL)")
+    conn.execute("INSERT INTO watchlist VALUES (NULL, 'x', 'KRW', '2026-01-01')")
+    conn.execute("INSERT INTO watchlist VALUES ('AAPL', 'Apple', 'USD', '2026-01-02')")
+    conn.commit()
+    conn.close()
+    repo = Repository(path)
+    assert [i.symbol for i in repo.watchlist()] == ["AAPL"]
+    assert repo._conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] == 1
+
+
+def test_get_quotes_skips_bad_code_without_failing_the_batch(monkeypatch):
+    from mock_trading.market_data import YFinanceProvider
+
+    requested = []
+
+    class FakeFrame(dict):
+        pass
+
+    class FakeYF:
+        @staticmethod
+        def download(symbols, **kwargs):
+            requested.extend(symbols)
+            import pandas as pd
+            index = pd.to_datetime(["2026-10-14", "2026-10-15"])
+            return {"Close": pd.DataFrame({"AAPL": [100.0, 101.0]}, index=index)}
+
+    provider = YFinanceProvider.__new__(YFinanceProvider)
+    provider._yf = FakeYF()
+    provider._names = {}
+    quotes = provider.get_quotes([("bad symbol!", "x", Currency.USD), ("AAPL", "Apple", Currency.USD)])
+    assert requested == ["AAPL"]
+    assert quotes["AAPL"].price == Decimal("101.0000")
+    assert quotes["AAPL"].previous_close == Decimal("100.0000")

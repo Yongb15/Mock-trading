@@ -45,7 +45,7 @@ class Watchlist:
         return self.repo.is_watched(*symbol_candidates(symbol))
 
     def rows(self) -> list[WatchRow]:
-        """담긴 종목의 현재 시세. 가능하면 요청 한 번으로 받고, 실패한 종목은 "시세 없음"으로 둔다."""
+        """담긴 종목의 현재 시세. 가능하면 일괄 조회 한 번으로 받고, 실패한 종목은 "시세 없음"으로 둔다."""
         items = self.repo.watchlist()
         get_quotes = getattr(self.provider, "get_quotes", None)
         if get_quotes is not None:

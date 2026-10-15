@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 -- 관심 종목은 계좌가 아니라 사용자 설정이라 계좌를 초기화해도 남는다.
 CREATE TABLE IF NOT EXISTS watchlist (
-    symbol    TEXT PRIMARY KEY,
+    symbol    TEXT NOT NULL PRIMARY KEY,
     name      TEXT NOT NULL,
     currency  TEXT NOT NULL CHECK (currency IN ('KRW', 'USD')),
     added_at  TEXT NOT NULL
@@ -250,9 +250,10 @@ class Repository:
         """손상된 관심 종목 행(코드 형식·통화가 이상한 행)은 보여줄 수도 지울 수도 없으므로 정리한다."""
         from .market_data import is_valid_symbol  # 순환 import 방지
 
-        for row in self._conn.execute("SELECT symbol, currency FROM watchlist").fetchall():
+        # symbol이 NULL이면 "symbol = ?"로는 지워지지 않으므로 rowid로 지운다.
+        for row in self._conn.execute("SELECT rowid, symbol, currency FROM watchlist").fetchall():
             if not is_valid_symbol(row["symbol"]) or row["currency"] not in ("KRW", "USD"):
-                self._conn.execute("DELETE FROM watchlist WHERE symbol = ?", (row["symbol"],))
+                self._conn.execute("DELETE FROM watchlist WHERE rowid = ?", (row["rowid"],))
 
     @_locked
     def add_watch(self, symbol: str, name: str, currency: Currency, *, limit: int) -> bool:
