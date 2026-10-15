@@ -715,6 +715,9 @@ class MainWindow(QMainWindow):
         if not ids:
             self.status.setText("취소할 주문을 표에서 선택하세요.")
             return
+        # Delete 키 하나로 되돌릴 수 없는 취소가 일어나지 않게 확인한다(관심 종목 빼기는 다시 담으면 되니 확인 없음).
+        if not _confirm(self, "대기 주문 취소", f"선택한 대기 주문 {len(ids)}건을 취소할까요?"):
+            return
 
         def job() -> int:
             return sum(1 for order_id in ids if self.broker.cancel_order(order_id))

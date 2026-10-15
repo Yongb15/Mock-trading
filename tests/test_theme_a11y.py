@@ -91,8 +91,21 @@ def test_delete_key_cancels_selected_order_and_enter_opens_stock(themed_app):
     window.tabs.setCurrentWidget(window.orders_tab)
     window.orders_table.setFocus()
     window.orders_table.selectRow(0)
-    QTest.keyClick(window.orders_table, Qt.Key_Delete)  # 실제 키 입력
-    _settle(themed_app, window)
+    from mock_trading.ui import main_window as mw
+
+    asked = []
+    original_confirm = mw._confirm
+    mw._confirm = lambda parent, title, text: asked.append(text) or False   # 처음엔 "아니오"
+    try:
+        QTest.keyClick(window.orders_table, Qt.Key_Delete)  # 실제 키 입력
+        _settle(themed_app, window)
+        assert asked == ["선택한 대기 주문 1건을 취소할까요?"]
+        assert broker.repo.orders()[0].status is OrderStatus.OPEN          # 확인 없이 취소되지 않는다
+        mw._confirm = lambda *a, **k: True
+        QTest.keyClick(window.orders_table, Qt.Key_Delete)
+        _settle(themed_app, window)
+    finally:
+        mw._confirm = original_confirm
     assert broker.repo.orders()[0].status is OrderStatus.CANCELLED
 
     # Enter(itemActivated)로 보유 종목 열기
