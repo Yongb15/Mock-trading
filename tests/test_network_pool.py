@@ -128,3 +128,74 @@ def test_batch_downloads_never_overlap():
     for t in threads:
         t.join()
     assert peak[0] == 1
+
+
+def test_limit_check_does_not_wait_long_for_another_download():
+    """Mock_Sequrity NP1: 관심 종목·자산 추이 다운로드가 잠금을 잡고 있어도 지정가 확인은 1.5초 안에 돌아오고,
+    실패로 기록하지 않아 다음 주기에 바로 다시 확인한다."""
+    from datetime import datetime
+
+    from mock_trading.broker import Broker
+    from mock_trading.domain import Currency, Quote, Side
+    from mock_trading.market_data import _DOWNLOAD_LOCK, YFinanceProvider
+
+    class Provider(YFinanceProvider):
+        def __init__(self):
+            self._names = {}
+            self.fake = FakeProvider()
+
+        def get_quote(self, symbol):
+            return self.fake.get_quote(symbol)
+
+        def get_usd_krw(self):
+            return self.fake.get_usd_krw()
+
+    broker = Broker(Repository(), Provider())
+    broker.open_account(10_000_000)
+    broker.place_limit_order(Side.BUY, "005930", 1, Decimal("70000"), expected_price=Decimal("70000"))
+    holder_ready, release = threading.Event(), threading.Event()
+
+    def hold_lock():
+        with _DOWNLOAD_LOCK:
+            holder_ready.set()
+            release.wait(10)
+
+    t = threading.Thread(target=hold_lock)
+    t.start()
+    holder_ready.wait(5)
+    started = time.time()
+    try:
+        assert broker.check_limit_orders(datetime(2026, 10, 15, 12)) == []
+        assert time.time() - started < 2.5
+        assert broker._quote_failed_at == {}  # "이번엔 못 봄"이지 실패가 아니다
+    finally:
+        release.set()
+        t.join()
+    _ = (Currency, Quote)
+
+
+def test_order_path_logs_are_not_hidden_by_another_threads_download(caplog):
+    """Mock_Sequrity NP2: 일괄 조회 중에도 다른 스레드의 yfinance 로그는 보인다."""
+    import logging
+
+    from mock_trading.market_data import _quiet_batch_failures
+
+    logger = logging.getLogger("yfinance")
+    inside, release = threading.Event(), threading.Event()
+
+    def batch():
+        with _quiet_batch_failures():
+            logger.error("batch-thread failure")  # 이건 숨김
+            inside.set()
+            release.wait(5)
+
+    t = threading.Thread(target=batch)
+    t.start()
+    inside.wait(5)
+    with caplog.at_level(logging.WARNING, logger="yfinance"):
+        logger.error("order-path error")             # 주문 경로 스레드의 로그는 보여야 한다
+    release.set()
+    t.join()
+    messages = [r.getMessage() for r in caplog.records]
+    assert "order-path error" in messages
+    assert "batch-thread failure" not in messages
