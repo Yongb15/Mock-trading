@@ -35,3 +35,9 @@ class AutoConfirmBroker(Broker):
     def sell(self, symbol, quantity, *, expected_price=None, expected_fx=None):
         expected_price, expected_fx = self._confirmed(symbol, expected_price, expected_fx)
         return super().sell(symbol, quantity, expected_price=expected_price, expected_fx=expected_fx)
+
+    def place_limit_order(self, side, symbol, quantity, limit_price, *, expected_price=None, expected_fx=None):
+        expected_price, expected_fx = self._confirmed(symbol, expected_price, expected_fx)
+        return super().place_limit_order(
+            side, symbol, quantity, limit_price, expected_price=expected_price, expected_fx=expected_fx
+        )

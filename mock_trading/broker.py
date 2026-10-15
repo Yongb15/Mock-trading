@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from .domain import (
@@ -9,6 +10,8 @@ from .domain import (
     USD_KRW_MAX,
     USD_KRW_MIN,
     Currency,
+    LimitOrder,
+    OrderStatus,
     Position,
     Quote,
     Side,
@@ -33,6 +36,34 @@ PRICE_BAND = {
     Currency.KRW: (Decimal("0.65"), Decimal("1.35")),
     Currency.USD: (Decimal(1) / 3, Decimal(3)),
 }
+
+
+# 지정가는 현재가의 이 범위 안에서만 받는다(자릿수를 잘못 쳐서 엉뚱한 가격에 걸어 두는 실수 방지).
+LIMIT_PRICE_BAND = (Decimal("0.5"), Decimal("1.5"))
+MAX_OPEN_ORDERS = 50
+# 미국 주식 지정가: 체결 때 환율이 주문 때보다 이만큼(%) 넘게 다르면 체결을 미룬다.
+FX_DRIFT_LIMIT = Decimal(10)
+# 지정가 두 번째 확인은 첫 확인에서 이만큼 지난 뒤여야 한다(자동 갱신 60초보다 조금 짧게 — 타이머가 조금 일찍
+# 돌아도 한 주기를 통째로 미루지 않게).
+CONFIRM_GAP = timedelta(seconds=50)
+# 지정가 확인 중 시세를 못 받은 종목은 이 시간 동안 다시 묻지 않는다(요청 제한 중 계속 두드리지 않게).
+QUOTE_RETRY_INTERVAL = timedelta(minutes=5)
+
+
+@dataclass(frozen=True)
+class OrderEvent:
+    """지정가 주문 확인 결과: 체결(trade 있음) 또는 거부(note에 이유)."""
+    order: LimitOrder
+    trade: Trade | None
+    note: str
+
+
+class _AccountChanged(Exception):
+    pass
+
+
+class _OrderAlreadyClosed(Exception):
+    pass
 
 
 # 확인창에서 본 가격과 체결 시 가격이 이만큼(%) 넘게 다르면 다시 확인하게 한다.
@@ -78,6 +109,7 @@ class Broker:
         self.repo = repo
         self.provider = provider
         self.fees = fees or FeePolicy()
+        self._quote_failed_at: dict[str, datetime] = {}  # 지정가 확인 중 시세를 못 받은 종목(잠시 다시 묻지 않음)
 
     # ---- 계좌 ----
     def open_account(self, initial_cash: Decimal | int | str) -> None:
@@ -156,43 +188,248 @@ class Broker:
         self._require_account()
         # 네트워크 조회 중에 계좌가 초기화되면, 이전 계좌에서 낸 주문을 새 계좌에 기록하지 않는다.
         generation = self.repo.account_generation()
+        quote = self._checked_quote(symbol)
+        self._check_slippage(quote.price, expected_price, "가격")
+        fx_rate = self.fx_rate_for(quote.currency)
+        if quote.currency is not Currency.KRW:
+            self._check_slippage(fx_rate, expected_fx, "환율")
+        amount, fee = self._amount_and_fee(side, quote, fx_rate, quantity)
+        # 확인과 기록을 한 트랜잭션에서: 그 사이에 다른 주문이 끼어들 수 없다.
+        with self.repo.transaction():
+            self._check_generation(generation)
+            self._check_funds(side, quote.symbol, quantity, amount + fee if side is Side.BUY else None)
+            return self._record(side, quote, quantity, fx_rate, amount, fee)
+
+    # ---- 체결 공통 ----
+    def _amount_and_fee(self, side: Side, quote: Quote, fx_rate: Decimal, quantity: int) -> tuple[Decimal, Decimal]:
         try:
-            quote = self._checked_quote(symbol)
-            self._check_slippage(quote.price, expected_price, "가격")
-            fx_rate = self.fx_rate_for(quote.currency)
-            if quote.currency is not Currency.KRW:
-                self._check_slippage(fx_rate, expected_fx, "환율")
             amount = krw(quote.price * fx_rate * quantity)
             fee = self.fees.fee(side, quote.currency, amount)
         except InvalidOperation:
             raise TradingError("금액을 계산할 수 없는 시세입니다.") from None
         if amount <= 0:
             raise TradingError("체결 금액이 0원이라 주문할 수 없습니다.")
+        return amount, fee
 
-        # 확인과 기록을 한 트랜잭션에서: 그 사이에 다른 주문이 끼어들 수 없다.
+    def _check_generation(self, generation: str | None) -> None:
+        if self.repo.account_generation() != generation:
+            raise TradingError("주문을 처리하는 동안 계좌가 초기화되어 주문을 취소했습니다.")
+
+    def _check_funds(self, side: Side, symbol: str, quantity: int, buy_cost: Decimal | None) -> None:
+        """트랜잭션 안에서 부른다. 매수는 현금, 매도는 보유 수량을 확인한다."""
+        ledger = self.repo.ledger()
+        if side is Side.BUY:
+            if buy_cost > ledger.cash:
+                raise TradingError(f"현금이 부족합니다. 필요 {buy_cost:,}원 / 보유 {ledger.cash:,}원")
+        else:
+            held = ledger.holdings.get(symbol)
+            held_quantity = held.quantity if held else 0
+            if quantity > held_quantity:
+                raise TradingError(f"보유 수량이 부족합니다. 주문 {quantity}주 / 보유 {held_quantity}주")
+
+    def _record(self, side: Side, quote: Quote, quantity: int, fx_rate: Decimal, amount: Decimal, fee: Decimal) -> Trade:
+        return self.repo.add_trade(
+            symbol=quote.symbol,
+            name=quote.name,
+            side=side,
+            quantity=quantity,
+            price=quote.price,
+            currency=quote.currency,
+            fx_rate=fx_rate,
+            amount_krw=amount,
+            fee_krw=fee,
+        )
+
+    # ---- 지정가 주문 ----
+    def place_limit_order(
+        self,
+        side: Side,
+        symbol: str,
+        quantity: int,
+        limit_price: Decimal,
+        *,
+        expected_price: Decimal,
+        expected_fx: Decimal | None = None,
+    ) -> LimitOrder:
+        """주문을 저장만 한다. 체결은 check_limit_orders가 시세를 확인할 때 일어난다.
+
+        시장가처럼 사용자가 확인창에서 본 현재가·환율과 5% 넘게 다르면 거부한다. 주문 때 환율은 나중에 체결 때
+        비교 기준이 되므로, 오류 환율이 기준으로 저장되지 않게 하는 것이 특히 중요하다.
+        """
+        self._validate_quantity(quantity)
+        self._require_account()
+        generation = self.repo.account_generation()
+        quote = self._checked_quote(symbol)
+        self._check_slippage(quote.price, expected_price, "가격")
+        limit = normalize_price(quote.currency, positive_decimal(limit_price, "지정가"))
+        low, high = LIMIT_PRICE_BAND
+        if not quote.price * low <= limit <= quote.price * high:
+            raise TradingError(
+                f"지정가는 현재가의 {low * 100:.0f}%~{high * 100:.0f}% 사이로 정해 주세요."
+            )
+        fx_rate = self.fx_rate_for(quote.currency)
+        if quote.currency is not Currency.KRW:
+            self._check_slippage(fx_rate, expected_fx, "환율")
+        with self.repo.transaction():
+            self._check_generation(generation)
+            open_orders = self.repo.orders(open_only=True)
+            if len(open_orders) >= MAX_OPEN_ORDERS:
+                raise TradingError(f"대기 중인 지정가 주문은 {MAX_OPEN_ORDERS}개까지 둘 수 있습니다.")
+            if side is Side.SELL:
+                # 이미 걸어 둔 매도 주문까지 합쳐 보유 수량을 넘지 않게 한다.
+                pending = self.pending_sell_quantity(quote.symbol, open_orders)
+                held = self.repo.ledger().holdings.get(quote.symbol)
+                held_quantity = held.quantity if held else 0
+                if pending + quantity > held_quantity:
+                    raise TradingError(
+                        f"보유 수량이 부족합니다. 주문 {quantity}주 + 대기 중인 판매 {pending}주 / 보유 {held_quantity}주"
+                    )
+            else:
+                # 지정가로 샀을 때의 금액 기준으로 지금 현금으로 가능한지만 확인한다(현금을 묶어 두지는 않음 —
+                # 체결할 때 다시 확인하고, 부족하면 그때 "거부"로 닫는다).
+                cost = krw(limit * fx_rate * quantity)
+                self._check_funds(side, quote.symbol, quantity, cost + self.fees.fee(side, quote.currency, cost))
+            return self.repo.add_order(
+                symbol=quote.symbol, name=quote.name, side=side, quantity=quantity,
+                limit_price=limit, currency=quote.currency,
+                fx_at_order=fx_rate if quote.currency is Currency.USD else None,
+            )
+
+    def pending_sell_quantity(self, symbol: str, open_orders: list[LimitOrder] | None = None) -> int:
+        """대기 중인 지정가 매도 수량 합계(시장가 매도 확인창 안내와 이중 매도 방지에 쓴다)."""
+        orders = self.repo.orders(open_only=True) if open_orders is None else open_orders
+        return sum(o.quantity for o in orders if o.side is Side.SELL and o.symbol == symbol)
+
+    def cancel_order(self, order_id: int) -> bool:
+        if isinstance(order_id, bool) or not isinstance(order_id, int):
+            raise TradingError("주문 번호가 올바르지 않습니다.")
+        with self.repo.transaction():
+            return self.repo.close_order(order_id, OrderStatus.CANCELLED, note="사용자 취소")
+
+    def check_limit_orders(self, now: datetime | None = None) -> list[OrderEvent]:
+        """대기 주문의 조건을 확인하고, 두 번 연속 맞은 주문을 지정가로 체결한다(오래된 주문부터).
+
+        - 1단계: 대기 종목 시세를 일괄 조회(get_quotes)해 조건에 맞는 주문만 고른다.
+        - 2단계: 고른 종목만 _checked_quote로 다시 확인한다(전일 종가 대비 범위, fail-closed).
+        - 처음 맞으면 "대기(확인 1회)"로 표시만 하고, 다음 확인에서도 맞으면 체결한다 — 순간적인 오류 시세 하나로
+          체결되지 않게. 체결가는 시세가 아니라 지정가라서 오류 시세가 사용자가 정한 가격보다 유리한 체결을 만들지 않는다.
+        - 미국 주식은 주문할 때의 환율과 FX_DRIFT_LIMIT % 넘게 다르면 체결을 미룬다.
+        """
+        if not self.repo.has_account():
+            return []
+        now = now or datetime.now()
+        generation = self.repo.account_generation()
+        open_orders = self.repo.orders(open_only=True)
+        if not open_orders:
+            return []
+        prices = self._screen_prices(open_orders, now)
+        confirmed: dict[str, Quote | None] = {}
+        fx_now: Decimal | None = None
+        fx_failed = False
+        events = []
+        for order in open_orders:
+            price = prices.get(order.symbol)
+            if price is None:
+                continue  # 시세를 모르면 판단을 미룬다(확인 1회 표시도 그대로)
+            if not order.is_triggered(price):
+                if order.armed:
+                    self.repo.set_order_armed(order.id, None)
+                continue
+            if order.symbol not in confirmed:
+                try:
+                    confirmed[order.symbol] = self._checked_quote(order.symbol)
+                except Exception:
+                    confirmed[order.symbol] = None
+                    self._quote_failed_at[order.symbol] = now
+            quote = confirmed[order.symbol]
+            if quote is None or not order.is_triggered(quote.price):
+                continue
+            if not order.armed or order.armed_at is None:
+                self.repo.set_order_armed(order.id, now)  # 다음 확인에서도 맞으면 체결
+                continue
+            if now - order.armed_at < CONFIRM_GAP:
+                continue  # 새로고침 연타처럼 곧바로 다시 확인하면 같은 오류 데이터를 두 번 잡을 수 있어 기다린다
+            fx_rate = Decimal(1)
+            if order.currency is Currency.USD:
+                if fx_now is None and not fx_failed:
+                    try:
+                        fx_now = self.fx_rate_for(Currency.USD)
+                    except Exception:
+                        fx_failed = True
+                if fx_now is None:
+                    self.repo.set_order_note(order.id, "환율을 받지 못해 체결 보류")
+                    continue
+                if order.fx_at_order is None:
+                    self.repo.set_order_note(order.id, "주문 때 환율 기록이 없어 체결 보류 — 취소 후 다시 주문하세요")
+                    continue
+                if abs(fx_now - order.fx_at_order) / order.fx_at_order * 100 > FX_DRIFT_LIMIT:
+                    # 환율이 주문 때와 크게 달라 체결을 미룬다(오류 환율로 금액이 부풀지 않게)
+                    self.repo.set_order_note(
+                        order.id, f"환율 변동으로 체결 보류 (주문 때 {order.fx_at_order:,} → 지금 {fx_now:,})"
+                    )
+                    continue
+                fx_rate = fx_now
+            fill = Quote(quote.symbol, order.name, order.limit_price, order.currency, quote.previous_close)
+            try:
+                amount, fee = self._amount_and_fee(order.side, fill, fx_rate, order.quantity)
+            except TradingError:
+                continue
+            try:
+                event = self._fill_order(order, fill, fx_rate, amount, fee, generation)
+            except _AccountChanged:
+                break  # 확인하는 사이 계좌가 초기화됨: 남은 주문은 이미 지워졌다
+            except _OrderAlreadyClosed:
+                continue  # 그사이 취소됨: 체결 기록까지 되돌렸다
+            if event is not None:
+                events.append(event)
+        return events
+
+    def _screen_prices(self, orders: list[LimitOrder], now: datetime) -> dict[str, Decimal]:
+        """조건 판단용 현재가. 일괄 조회가 되면 한 번에, 아니면 종목별로. 최근 실패한 종목은 잠시 건너뛴다."""
+        wanted = {}
+        for order in orders:
+            failed_at = self._quote_failed_at.get(order.symbol)
+            if failed_at is not None and now - failed_at < QUOTE_RETRY_INTERVAL:
+                continue
+            wanted[order.symbol] = (order.symbol, order.name, order.currency)
+        get_quotes = getattr(self.provider, "get_quotes", None)
+        prices: dict[str, Decimal] = {}
+        if get_quotes is not None:
+            try:
+                quotes = get_quotes(list(wanted.values()))
+            except Exception:
+                quotes = {}
+            prices = {symbol: q.price for symbol, q in quotes.items() if symbol in wanted}
+        else:
+            for symbol in wanted:
+                try:
+                    prices[symbol] = self.provider.get_quote(symbol).price
+                except Exception:
+                    pass
+        for symbol in wanted:
+            if symbol not in prices:
+                self._quote_failed_at[symbol] = now
+        return prices
+
+    def _fill_order(
+        self, order: LimitOrder, quote: Quote, fx_rate: Decimal, amount: Decimal, fee: Decimal, generation: str | None
+    ) -> OrderEvent | None:
+        """주문 하나를 체결하거나 거부로 닫는다. 확인·기록·주문 상태 변경이 한 트랜잭션이다."""
         with self.repo.transaction():
             if self.repo.account_generation() != generation:
-                raise TradingError("주문을 처리하는 동안 계좌가 초기화되어 주문을 취소했습니다.")
-            ledger = self.repo.ledger()
-            if side is Side.BUY:
-                if amount + fee > ledger.cash:
-                    raise TradingError(f"현금이 부족합니다. 필요 {amount + fee:,}원 / 보유 {ledger.cash:,}원")
-            else:
-                held = ledger.holdings.get(quote.symbol)
-                held_quantity = held.quantity if held else 0
-                if quantity > held_quantity:
-                    raise TradingError(f"보유 수량이 부족합니다. 주문 {quantity}주 / 보유 {held_quantity}주")
-            return self.repo.add_trade(
-                symbol=quote.symbol,
-                name=quote.name,
-                side=side,
-                quantity=quantity,
-                price=quote.price,
-                currency=quote.currency,
-                fx_rate=fx_rate,
-                amount_krw=amount,
-                fee_krw=fee,
-            )
+                raise _AccountChanged()
+            try:
+                self._check_funds(order.side, order.symbol, order.quantity,
+                                  amount + fee if order.side is Side.BUY else None)
+            except TradingError as error:
+                if self.repo.close_order(order.id, OrderStatus.REJECTED, note=str(error)):
+                    return OrderEvent(order, None, str(error))
+                return None
+            trade = self._record(order.side, quote, order.quantity, fx_rate, amount, fee)
+            if not self.repo.close_order(order.id, OrderStatus.FILLED, trade_id=trade.id):
+                # 그사이 취소됐다: 예외로 트랜잭션을 되돌려 체결 기록도 남기지 않는다
+                raise _OrderAlreadyClosed()
+            return OrderEvent(order, trade, "")
 
     @staticmethod
     def _validate_quantity(quantity: int) -> None:
