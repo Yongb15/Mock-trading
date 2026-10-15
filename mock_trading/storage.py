@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterator
 
-from .domain import Currency, Holding, Side, Trade, TradingError, krw, to_decimal
+from .domain import Currency, Holding, LimitOrder, OrderStatus, Side, Trade, TradingError, krw, to_decimal
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account (
@@ -38,6 +38,21 @@ CREATE TABLE IF NOT EXISTS trades (
     fx_rate      TEXT    NOT NULL,
     amount_krw   TEXT    NOT NULL,
     fee_krw      TEXT    NOT NULL
+);
+-- 지정가 주문. 계좌에 딸린 기록이라 계좌를 초기화하면 함께 지운다.
+CREATE TABLE IF NOT EXISTS orders (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at   TEXT    NOT NULL,
+    symbol       TEXT    NOT NULL,
+    name         TEXT    NOT NULL,
+    side         TEXT    NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    quantity     INTEGER NOT NULL CHECK (typeof(quantity) = 'integer' AND quantity > 0),
+    limit_price  TEXT    NOT NULL,
+    currency     TEXT    NOT NULL CHECK (currency IN ('KRW', 'USD')),
+    status       TEXT    NOT NULL CHECK (status IN ('OPEN', 'FILLED', 'CANCELLED', 'REJECTED')),
+    trade_id     INTEGER REFERENCES trades(id),
+    note         TEXT    NOT NULL DEFAULT '',
+    closed_at    TEXT
 );
 -- 관심 종목은 계좌가 아니라 사용자 설정이라 계좌를 초기화해도 남는다.
 CREATE TABLE IF NOT EXISTS watchlist (
@@ -163,6 +178,7 @@ class Repository:
     def reset_account(self, initial_cash: Decimal) -> None:
         """기초 자금을 새로 받고 거래 내역을 모두 지운다."""
         with self.transaction():
+            self._conn.execute("DELETE FROM orders")
             self._conn.execute("DELETE FROM trades")
             self._conn.execute("DELETE FROM account")
             self._conn.execute(
@@ -254,6 +270,64 @@ class Repository:
             )
         except (ValueError, TypeError) as error:
             raise LedgerError(f"거래 #{row['id']}의 기록이 손상되었습니다: {error}") from None
+
+    # ---- 지정가 주문 ----
+    @_locked
+    def add_order(
+        self, *, symbol: str, name: str, side: Side, quantity: int, limit_price: Decimal, currency: Currency
+    ) -> LimitOrder:
+        if not (isinstance(limit_price, Decimal) and limit_price.is_finite() and limit_price > 0):
+            raise TradingError("지정가가 올바르지 않아 주문을 저장하지 않았습니다.")
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise TradingError("수량이 올바르지 않아 주문을 저장하지 않았습니다.")
+        created_at = datetime.now().replace(microsecond=0)
+        cursor = self._conn.execute(
+            """
+            INSERT INTO orders (created_at, symbol, name, side, quantity, limit_price, currency, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN')
+            """,
+            (created_at.isoformat(), symbol, name, side.value, quantity, str(limit_price), currency.value),
+        )
+        return LimitOrder(cursor.lastrowid, created_at, symbol, name, side, quantity, limit_price, currency,
+                          OrderStatus.OPEN)
+
+    @_locked
+    def orders(self, *, open_only: bool = False, limit: int = 200) -> list[LimitOrder]:
+        """최근 주문부터(open_only면 대기 중인 것만, 오래된 것부터 = 체결 확인 순서)."""
+        if open_only:
+            rows = self._conn.execute("SELECT * FROM orders WHERE status = 'OPEN' ORDER BY id").fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM orders ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        orders = []
+        for row in rows:
+            try:
+                orders.append(LimitOrder(
+                    id=row["id"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    symbol=row["symbol"],
+                    name=row["name"],
+                    side=Side(row["side"]),
+                    quantity=row["quantity"],
+                    limit_price=_stored_decimal(row["limit_price"], "지정가"),
+                    currency=Currency(row["currency"]),
+                    status=OrderStatus(row["status"]),
+                    trade_id=row["trade_id"],
+                    note=row["note"],
+                ))
+            except (ValueError, TypeError, LedgerError):
+                continue  # 손상된 주문은 체결하지 않는다(돈이 움직이기 전이라 건너뛰어도 안전)
+        return orders
+
+    @_locked
+    def close_order(self, order_id: int, status: OrderStatus, *, trade_id: int | None = None, note: str = "") -> bool:
+        """대기 중인 주문만 닫는다. 이미 닫혔으면 False — 같은 주문이 두 번 체결되지 않게 하는 마지막 장치."""
+        if status is OrderStatus.OPEN:
+            raise ValueError("OPEN으로는 닫을 수 없습니다.")
+        cursor = self._conn.execute(
+            "UPDATE orders SET status = ?, trade_id = ?, note = ?, closed_at = ? WHERE id = ? AND status = 'OPEN'",
+            (status.value, trade_id, note[:200], datetime.now().isoformat(timespec="seconds"), order_id),
+        )
+        return cursor.rowcount == 1
 
     # ---- 관심 종목 ----
     def _purge_invalid_watch(self) -> None:

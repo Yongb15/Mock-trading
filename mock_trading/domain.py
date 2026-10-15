@@ -36,6 +36,13 @@ class Side(str, Enum):
     SELL = "SELL"
 
 
+class OrderStatus(str, Enum):
+    OPEN = "OPEN"            # 체결 대기
+    FILLED = "FILLED"        # 체결됨
+    CANCELLED = "CANCELLED"  # 사용자가 취소
+    REJECTED = "REJECTED"    # 조건은 맞았지만 현금·보유 수량 부족 등으로 체결하지 못함
+
+
 class TradingError(Exception):
     """사용자에게 그대로 보여줄 수 있는 주문 오류."""
 
@@ -130,6 +137,25 @@ class Trade:
     fx_rate: Decimal        # 1 종목통화 = fx_rate 원. 원화 종목은 1
     amount_krw: Decimal     # 수수료 제외 체결 금액 (원)
     fee_krw: Decimal
+
+
+@dataclass(frozen=True)
+class LimitOrder:
+    """지정가 주문. 매수는 현재가가 지정가 이하, 매도는 이상이 되면 그때의 현재가로 체결한다."""
+    id: int
+    created_at: datetime
+    symbol: str
+    name: str
+    side: Side
+    quantity: int
+    limit_price: Decimal  # 종목 통화 기준
+    currency: Currency
+    status: OrderStatus
+    trade_id: int | None = None
+    note: str = ""
+
+    def is_triggered(self, price: Decimal) -> bool:
+        return price <= self.limit_price if self.side is Side.BUY else price >= self.limit_price
 
 
 @dataclass(frozen=True)
