@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -28,6 +29,9 @@ from .domain import (
 )
 
 USD_KRW_SYMBOL = "KRW=X"
+
+# yf.download는 모듈 전역 상태를 쓰므로 두 스레드에서 동시에 부르면 결과가 섞일 수 있다 → 한 번에 하나씩.
+_DOWNLOAD_LOCK = threading.Lock()
 
 # 일괄 조회 때 동시에 보내는 요청 수 상한. 너무 많이 몰리면 Yahoo가 요청을 제한(429)해 주문용 시세까지 실패할 수 있다.
 DOWNLOAD_THREADS = 4
@@ -158,7 +162,7 @@ class YFinanceProvider:
         symbols = [symbol for symbol, _, _ in items]
         if not symbols:
             return {}
-        with _quiet_batch_failures():
+        with _DOWNLOAD_LOCK, _quiet_batch_failures():
             frame = self._yf.download(
                 symbols, period="5d", progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS
             )
@@ -184,7 +188,7 @@ class YFinanceProvider:
             tickers.append(USD_KRW_SYMBOL)
         if not tickers:
             return {}, {}
-        with _quiet_batch_failures():
+        with _DOWNLOAD_LOCK, _quiet_batch_failures():
             frame = self._yf.download(
                 tickers, start=start.isoformat(), progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS
             )

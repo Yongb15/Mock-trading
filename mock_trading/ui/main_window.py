@@ -110,7 +110,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.broker = broker
         self.watchlist = watchlist or Watchlist(broker.repo, broker.provider)
+        # 주문·초기화·계좌·시세처럼 순서가 중요한 일은 한 줄로, 관심 종목·자산 추이처럼 읽기만 하는 느린 조회는
+        # 따로 돌려 주문이 그 뒤에서 기다리지 않게 한다(DB는 Repository 잠금으로 직렬화된다).
         self.worker = Worker()
+        self.reader = Worker(threads=2)
+        self._view_generation = 0  # 계좌를 초기화할 때마다 올린다 → 초기화 전에 시작한 조회 결과는 버린다
         self.current: _QuoteView | None = None
         self._order_pending = False
         self._reset_pending = False
@@ -434,6 +438,7 @@ class MainWindow(QMainWindow):
 
         def done(_: object) -> None:
             self._reset_pending = False
+            self._view_generation += 1
             self.current = None
             self._set_order_enabled(False)
             self.status.setText(f"계좌를 {fmt.won(Decimal(amount))}으로 초기화했습니다.")
@@ -518,18 +523,23 @@ class MainWindow(QMainWindow):
             return
         self._history_loading = True
 
+        generation = self._view_generation
+
         def job() -> list[AssetPoint]:
             return load_asset_history(self.broker.repo, self.broker.provider, date.today(), self._history_cache)
 
         def done(points: list[AssetPoint]) -> None:
             self._history_loading = False
+            if generation != self._view_generation:
+                self._load_visible_tab()  # 초기화 전 계좌의 결과 → 버리고 새 계좌로 다시
+                return
             self._show_asset_history(points)
 
         def failed(message: str) -> None:
             self._history_loading = False
             self._show_error(message)
 
-        self.worker.run(job, done, failed)
+        self.reader.run(job, done, failed)
 
     def _show_asset_history(self, points: list[AssetPoint]) -> None:
         chart = self.history_chart
@@ -597,15 +607,20 @@ class MainWindow(QMainWindow):
             return
         self._watch_loading = True
 
+        generation = self._view_generation
+
         def done(rows: list[WatchRow]) -> None:
             self._watch_loading = False
+            if generation != self._view_generation:
+                self._load_visible_tab()
+                return
             self._show_watchlist(rows)
 
         def failed(message: str) -> None:
             self._watch_loading = False
             self._show_error(message)
 
-        self.worker.run(self.watchlist.rows, done, failed)
+        self.reader.run(self.watchlist.rows, done, failed)
 
     def toggle_watch(self) -> None:
         if not self.current:
@@ -1026,4 +1041,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
         self.timer.stop()
         self.worker.wait(CLOSE_WAIT_MS)  # 네트워크가 끊겨도 닫기가 멈추지 않게
+        self.reader.wait(CLOSE_WAIT_MS)
         super().closeEvent(event)
