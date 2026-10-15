@@ -43,6 +43,16 @@ class QuoteProvider(Protocol):
     def get_history(self, symbol: str, period: str = "3mo") -> list[PricePoint]: ...
 
 
+def is_valid_symbol(value: object) -> bool:
+    return isinstance(value, str) and _SYMBOL_PATTERN.fullmatch(value) is not None
+
+
+def symbol_candidates(raw: object) -> list[str]:
+    """6자리 한국 코드는 저장될 수 있는 두 형태(.KS/.KQ)를, 그 밖에는 정규화한 코드 하나를 돌려준다."""
+    symbol = normalize_symbol(raw)
+    return [f"{symbol}.KS", f"{symbol}.KQ"] if _KR_CODE.fullmatch(symbol) else [symbol]
+
+
 def normalize_symbol(raw: object) -> str:
     """입력 정리: 공백 제거, 대문자. 6자리 숫자는 한국 종목 코드로 본다(시장 접미사는 조회 시 결정)."""
     if not isinstance(raw, str):
@@ -110,6 +120,28 @@ class YFinanceProvider:
 
     def get_usd_krw(self) -> Decimal:
         return normalize_fx(positive_decimal(self._yf.Ticker(USD_KRW_SYMBOL).fast_info.last_price, "환율"))
+
+    def get_quotes(self, items: list[tuple[str, str, Currency]]) -> dict[str, Quote]:
+        """관심 종목처럼 여러 종목을 요청 한 번으로 조회한다. 실패한 종목은 결과에서 빠진다.
+
+        items: (정규화된 코드, 이름, 통화). 일봉 종가의 마지막 두 값을 현재가·전일 종가로 쓴다.
+        """
+        symbols = [normalize_symbol(symbol) for symbol, _, _ in items]
+        if not symbols:
+            return {}
+        frame = self._yf.download(symbols, period="5d", progress=False, auto_adjust=False, threads=False)
+        closes = frame["Close"]
+        quotes = {}
+        for symbol, name, currency in items:
+            try:
+                series = closes[symbol] if hasattr(closes, "columns") else closes
+                values = [positive_decimal(float(v), "종가") for v in series.dropna().tolist()[-2:]]
+                price = normalize_price(currency, values[-1])
+                previous = normalize_price(currency, values[-2]) if len(values) == 2 else None
+            except Exception:
+                continue
+            quotes[symbol] = Quote(symbol, clean_name(name, symbol), price, currency, previous)
+        return quotes
 
     def get_history(self, symbol: str, period: str = "3mo") -> list[PricePoint]:
         if period not in HISTORY_PERIODS:

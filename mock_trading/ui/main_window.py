@@ -104,6 +104,8 @@ class MainWindow(QMainWindow):
         self.current: _QuoteView | None = None
         self._order_pending = False
         self._reset_pending = False
+        self._watch_pending = False
+        self._watch_loading = False
 
         self.setWindowTitle("모의투자")
         self.resize(1200, 780)
@@ -237,7 +239,7 @@ class MainWindow(QMainWindow):
         self.trades_table = self._table(["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료"])
         self.watch_table = self._table(["종목", "코드", "현재가", "전일 대비"])
         self.watch_table.cellDoubleClicked.connect(self._open_watch)
-        watch_tab = QWidget()
+        watch_tab = self.watch_tab = QWidget()
         watch_layout = QVBoxLayout(watch_tab)
         watch_layout.setContentsMargins(0, 0, 0, 0)
         watch_layout.addWidget(self.watch_table, 1)
@@ -247,6 +249,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.holdings_table, "보유 종목")
         tabs.addTab(self.trades_table, "거래 내역")
         tabs.addTab(watch_tab, "관심 종목")
+        tabs.currentChanged.connect(lambda _: self.tabs.currentWidget() is self.watch_tab and self.load_watchlist())
+        self.tabs = tabs
         return tabs
 
     @staticmethod
@@ -329,9 +333,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ 데이터 불러오기
     def refresh_all(self) -> None:
         self.load_portfolio()
-        self.load_watchlist()
         if self.current:
             self.load_quote(self.current.quote.symbol)
+        # 관심 종목은 가장 덜 급하므로 맨 뒤에, 탭이 보일 때만.
+        if self.tabs.currentWidget() is self.watch_tab:
+            self.load_watchlist()
 
     def load_portfolio(self) -> None:
         def job() -> _PortfolioView:
@@ -364,13 +370,28 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 관심 종목
     def load_watchlist(self) -> None:
-        self.worker.run(self.watchlist.rows, self._show_watchlist, self._show_error)
+        if self._watch_loading:  # 직전 갱신이 아직 대기열에 있으면 또 넣지 않는다
+            return
+        self._watch_loading = True
+
+        def done(rows: list[WatchRow]) -> None:
+            self._watch_loading = False
+            self._show_watchlist(rows)
+
+        def failed(message: str) -> None:
+            self._watch_loading = False
+            self._show_error(message)
+
+        self.worker.run(self.watchlist.rows, done, failed)
 
     def toggle_watch(self) -> None:
         if not self.current:
             return
+        if self._watch_pending:
+            return
         symbol = self.current.quote.symbol
         adding = not self.current.watched
+        self._watch_pending = True
         self.watch_button.setEnabled(False)
 
         def job() -> bool:
@@ -381,6 +402,7 @@ class MainWindow(QMainWindow):
             return adding
 
         def done(added: bool) -> None:
+            self._watch_pending = False
             if self.current and self.current.quote.symbol == symbol:
                 self.current.watched = added
                 self._show_watch_state()
@@ -388,6 +410,7 @@ class MainWindow(QMainWindow):
             self.load_watchlist()
 
         def failed(message: str) -> None:
+            self._watch_pending = False
             self._show_watch_state()
             _warn(self, "관심 종목", message)
 
@@ -421,7 +444,7 @@ class MainWindow(QMainWindow):
 
     def _show_watch_state(self) -> None:
         watched = bool(self.current and self.current.watched)
-        self.watch_button.setEnabled(self.current is not None)
+        self.watch_button.setEnabled(self.current is not None and not self._watch_pending)
         self.watch_button.setChecked(watched)
         self.watch_button.setText("★ 관심" if watched else "☆ 관심")
 

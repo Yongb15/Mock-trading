@@ -113,3 +113,106 @@ def test_watch_toggle_in_window(provider):
     assert window.watch_button.text() == "☆ 관심"
     assert window.watch_table.rowCount() == 0
     window.close()
+
+
+# ---------------------------------------------------------------- 리뷰(f795e18) 반영
+import sqlite3  # noqa: E402
+
+from mock_trading.broker import Broker  # noqa: E402
+
+
+def test_remove_and_contains_accept_code_without_market_suffix(watchlist):
+    """QA W2: add("005930")은 005930.KS로 저장되는데, remove·contains도 "005930"을 받는다."""
+    watchlist.add("005930")
+    assert watchlist.contains("005930")
+    assert watchlist.remove("005930") is True
+    assert watchlist.rows() == []
+
+
+def test_corrupted_rows_are_purged_and_do_not_use_the_limit(tmp_path, provider):
+    """Security W2: 손상된 행은 지울 수 없고 한도만 차지하던 문제."""
+    path = tmp_path / "w.db"
+    repo = Repository(path)
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA ignore_check_constraints = ON")
+    conn.execute("INSERT INTO watchlist VALUES ('bad symbol!', 'x', 'KRW', '2026-01-01')")
+    conn.execute("INSERT INTO watchlist VALUES ('GOOD', 'x', 'EUR', '2026-01-01')")
+    conn.commit()
+    conn.close()
+    watchlist = Watchlist(repo, provider)
+    assert watchlist.rows() == []
+    assert repo._conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] == 0
+
+
+def test_stored_value_can_be_removed_even_if_malformed(watchlist):
+    watchlist.repo._conn.execute("INSERT INTO watchlist VALUES ('bad symbol!', 'x', 'KRW', '2026-01-01')")
+    assert watchlist.remove("bad symbol!") is True
+
+
+def test_names_are_cleaned_before_storing_even_from_other_providers(provider):
+    """Security W1: YFinanceProvider가 아닌 시세 출처가 정리 안 된 이름을 줘도 저장 전에 정리한다."""
+    evil = "Evil‮<b>Corp</b>\x00"
+    provider.quotes["EVIL"] = Quote("EVIL", evil, Decimal("10"), Currency.USD, Decimal("10"))
+    repo = Repository()
+    Watchlist(repo, provider).add("EVIL")
+    [item] = repo.watchlist()
+    assert "‮" not in item.name and "\x00" not in item.name
+
+    broker = Broker(repo, provider)
+    broker.open_account(10_000_000)
+    trade = broker.buy("EVIL", 1, expected_price=Decimal("10"), expected_fx=Decimal("1300"))
+    assert "‮" not in trade.name and "\x00" not in trade.name
+
+
+def test_rows_use_one_batch_request_when_provider_supports_it(provider):
+    """QA W1 / Security W3: 관심 종목 시세는 한 번에 받는다."""
+    calls = []
+
+    class BatchProvider(type(provider)):
+        def get_quotes(self, items):
+            calls.append([s for s, _, _ in items])
+            return {s: self.quotes[s] for s, _, _ in items if s in self.quotes}
+
+        def get_quote(self, symbol):
+            raise AssertionError("일괄 조회가 있으면 종목별 조회를 하지 않는다")
+
+    batch = BatchProvider()
+    repo = Repository()
+    for symbol, name, currency in [("AAPL", "Apple", Currency.USD), ("005930.KS", "Samsung", Currency.KRW), ("GONE", "Gone", Currency.USD)]:
+        repo.add_watch(symbol, name, currency, limit=50)
+    rows = {r.item.symbol: r for r in Watchlist(repo, batch).rows()}
+    assert len(calls) == 1 and sorted(calls[0]) == ["005930.KS", "AAPL", "GONE"]  # 요청 한 번
+    assert rows["AAPL"].quote is not None and rows["GONE"].quote is None
+
+
+def test_window_skips_duplicate_watch_refresh_and_only_refreshes_visible_tab(provider):
+    """QA W1·W3: 이전 갱신이 진행 중이면 또 넣지 않고, 관심 종목 탭이 안 보이면 자동 갱신하지 않는다."""
+    from PySide6.QtWidgets import QApplication
+
+    from mock_trading.ui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    broker = Broker(Repository(check_same_thread=False), provider)
+    broker.open_account(10_000_000)
+    window = MainWindow(broker)
+    calls = []
+    window.watchlist.rows = lambda: calls.append(1) or []
+
+    window.refresh_all()  # 첫 탭(보유 종목)이 보이는 중
+    window.worker.wait(3000)
+    app.processEvents()
+    assert calls == []
+
+    window.tabs.setCurrentWidget(window.watch_tab)  # 탭 전환 시 1회
+    window._watch_loading = True                    # 진행 중인 척
+    window.refresh_all()
+    window.worker.wait(3000)
+    app.processEvents()
+    assert len(calls) == 1
+
+    window._watch_pending = True
+    window.load_quote("AAPL")
+    window.worker.wait(3000)
+    app.processEvents()
+    assert not window.watch_button.isEnabled()      # 담기·빼기 처리 중에는 다시 켜지지 않음
+    window.close()

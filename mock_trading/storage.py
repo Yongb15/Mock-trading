@@ -246,10 +246,19 @@ class Repository:
             raise LedgerError(f"거래 #{row['id']}의 기록이 손상되었습니다: {error}") from None
 
     # ---- 관심 종목 ----
+    def _purge_invalid_watch(self) -> None:
+        """손상된 관심 종목 행(코드 형식·통화가 이상한 행)은 보여줄 수도 지울 수도 없으므로 정리한다."""
+        from .market_data import is_valid_symbol  # 순환 import 방지
+
+        for row in self._conn.execute("SELECT symbol, currency FROM watchlist").fetchall():
+            if not is_valid_symbol(row["symbol"]) or row["currency"] not in ("KRW", "USD"):
+                self._conn.execute("DELETE FROM watchlist WHERE symbol = ?", (row["symbol"],))
+
     @_locked
     def add_watch(self, symbol: str, name: str, currency: Currency, *, limit: int) -> bool:
         """추가하면 True, 이미 있으면 False. 개수 확인과 추가를 한 트랜잭션에서 한다."""
         with self.transaction():
+            self._purge_invalid_watch()  # 손상된 행이 한도를 차지하지 않게
             if self._conn.execute("SELECT 1 FROM watchlist WHERE symbol = ?", (symbol,)).fetchone():
                 return False
             count = self._conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0]
@@ -262,24 +271,28 @@ class Repository:
             return True
 
     @_locked
-    def remove_watch(self, symbol: str) -> bool:
-        cursor = self._conn.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol,))
-        return cursor.rowcount > 0
+    def remove_watch(self, *symbols: str) -> bool:
+        """저장된 값과 같은 코드를 지운다(바인딩이라 어떤 문자열이든 안전). 하나라도 지웠으면 True."""
+        removed = 0
+        for symbol in symbols:
+            removed += self._conn.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol,)).rowcount
+        return removed > 0
 
     @_locked
     def watchlist(self) -> list[WatchItem]:
+        with self.transaction():
+            self._purge_invalid_watch()
         rows = self._conn.execute("SELECT symbol, name, currency FROM watchlist ORDER BY added_at, symbol").fetchall()
         items = []
         for row in rows:
-            try:
-                items.append(WatchItem(row["symbol"], row["name"], Currency(row["currency"])))
-            except ValueError:
-                continue  # 손상된 행은 건너뛴다(장부와 달리 돈과 무관한 설정)
+            items.append(WatchItem(row["symbol"], row["name"], Currency(row["currency"])))
         return items
 
     @_locked
-    def is_watched(self, symbol: str) -> bool:
-        return self._conn.execute("SELECT 1 FROM watchlist WHERE symbol = ?", (symbol,)).fetchone() is not None
+    def is_watched(self, *symbols: str) -> bool:
+        return any(
+            self._conn.execute("SELECT 1 FROM watchlist WHERE symbol = ?", (s,)).fetchone() for s in symbols
+        )
 
     # ---- 장부에서 계산하는 값 ----
     @_locked
