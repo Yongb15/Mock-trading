@@ -101,6 +101,31 @@ def test_focus_follows_selected_menu(window, app):
     assert window.nav_buttons[1].hasFocus() and not window.nav_buttons[0].hasFocus()
 
 
+def test_cancel_confirmation_counts_only_open_orders(window, app):
+    """Mock_QA: 확인창의 "N건"은 선택한 행 중 대기 중인 주문만."""
+    from PySide6.QtWidgets import QTableWidgetItem
+
+    from mock_trading.ui import main_window as mw
+
+    window.orders_table.setRowCount(3)
+    for row, (order_id, status) in enumerate([(3, "대기"), (2, "체결"), (1, "대기 (확인 1회)")]):
+        window.orders_table.setItem(row, 0, QTableWidgetItem(str(order_id)))
+        window.orders_table.setItem(row, 6, QTableWidgetItem(status))
+    window.orders_table.selectAll()
+    asked = []
+    original = mw._confirm
+    mw._confirm = lambda parent, title, text: asked.append(text) or False
+    try:
+        window._cancel_selected_orders()
+        assert asked == ["선택한 대기 주문 2건을 취소할까요?"]
+        window.orders_table.clearSelection()
+        window.orders_table.selectRow(1)  # 체결된 행만
+        window._cancel_selected_orders()
+        assert len(asked) == 1 and "대기 중인 주문이 없습니다" in window.status.text()
+    finally:
+        mw._confirm = original
+
+
 def test_tab_leaves_the_menu(window, app):
     """Mock_QA N1: 선택된 메뉴에서 Tab을 누르면 메뉴가 아닌 위젯으로 간다(키보드 트랩 방지)."""
     from PySide6.QtTest import QTest
