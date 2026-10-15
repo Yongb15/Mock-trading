@@ -110,7 +110,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.broker = broker
         self.watchlist = watchlist or Watchlist(broker.repo, broker.provider)
+        # 주문·초기화·계좌·시세처럼 순서가 중요한 일은 한 줄로, 관심 종목·자산 추이처럼 읽기만 하는 느린 조회는
+        # 따로 돌려 주문이 그 뒤에서 기다리지 않게 한다(DB는 Repository 잠금으로 직렬화된다).
         self.worker = Worker()
+        self.reader = Worker(threads=2)
+        self._view_generation = 0  # 계좌를 초기화할 때마다 올린다 → 초기화 전에 시작한 조회 결과는 버린다
         self.current: _QuoteView | None = None
         self._order_pending = False
         self._reset_pending = False
@@ -118,6 +122,8 @@ class MainWindow(QMainWindow):
         self._watch_loading = False
         self._portfolio_loading = False
         self._history_loading = False
+        self._history_reload = False
+        self._watch_reload = False
         self._orders_checking = False
         self._unseen_order_events = 0
         self._order_notice: QMessageBox | None = None
@@ -442,6 +448,7 @@ class MainWindow(QMainWindow):
 
         def done(_: object) -> None:
             self._reset_pending = False
+            self._view_generation += 1
             self.current = None
             self._set_order_enabled(False)
             self.status.setText(f"계좌를 {fmt.won(Decimal(amount))}으로 초기화했습니다.")
@@ -523,21 +530,31 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ 자산 추이
     def load_asset_history(self) -> None:
         if self._history_loading:
+            self._history_reload = True  # 진행 중인 조회는 이 요청 전 상태일 수 있으니 끝나면 한 번 더
             return
         self._history_loading = True
+
+        generation = self._view_generation
 
         def job() -> list[AssetPoint]:
             return load_asset_history(self.broker.repo, self.broker.provider, date.today(), self._history_cache)
 
         def done(points: list[AssetPoint]) -> None:
             self._history_loading = False
+            if self._history_reload:
+                self._history_reload = False
+                self.load_asset_history()
+                return
+            if generation != self._view_generation:
+                self._load_visible_tab()  # 초기화 전 계좌의 결과 → 버리고 새 계좌로 다시
+                return
             self._show_asset_history(points)
 
         def failed(message: str) -> None:
             self._history_loading = False
             self._show_error(message)
 
-        self.worker.run(job, done, failed)
+        self.reader.run(job, done, failed)
 
     def _show_asset_history(self, points: list[AssetPoint]) -> None:
         chart = self.history_chart
@@ -601,19 +618,29 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 관심 종목
     def load_watchlist(self) -> None:
-        if self._watch_loading:  # 직전 갱신이 아직 대기열에 있으면 또 넣지 않는다
+        if self._watch_loading:  # 직전 갱신이 아직 진행 중이면 또 넣지 않고, 끝난 뒤 한 번 더
+            self._watch_reload = True
             return
         self._watch_loading = True
 
+        generation = self._view_generation
+
         def done(rows: list[WatchRow]) -> None:
             self._watch_loading = False
+            if self._watch_reload:
+                self._watch_reload = False
+                self.load_watchlist()
+                return
+            if generation != self._view_generation:
+                self._load_visible_tab()
+                return
             self._show_watchlist(rows)
 
         def failed(message: str) -> None:
             self._watch_loading = False
             self._show_error(message)
 
-        self.worker.run(self.watchlist.rows, done, failed)
+        self.reader.run(self.watchlist.rows, done, failed)
 
     def toggle_watch(self) -> None:
         if not self.current:
@@ -715,6 +742,7 @@ class MainWindow(QMainWindow):
             if events:
                 self._notify_order_events(events)
                 self.load_portfolio()
+                self._load_visible_tab()  # 자산 추이를 보고 있었다면 방금 체결도 그래프에
 
         def failed(message: str) -> None:
             self._orders_checking = False
@@ -1034,4 +1062,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
         self.timer.stop()
         self.worker.wait(CLOSE_WAIT_MS)  # 네트워크가 끊겨도 닫기가 멈추지 않게
+        self.reader.wait(CLOSE_WAIT_MS)
         super().closeEvent(event)
