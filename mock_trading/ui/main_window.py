@@ -52,6 +52,7 @@ class _QuoteView:
     held: int
     fx_rate: Decimal
     watched: bool = False
+    pending_sell: int = 0
 
 
 @dataclass
@@ -113,6 +114,8 @@ class MainWindow(QMainWindow):
         self._portfolio_loading = False
         self._history_loading = False
         self._orders_checking = False
+        self._unseen_order_events = 0
+        self._order_notice: QMessageBox | None = None
         self._history_cache = DailyCloseCache()
 
         self.setWindowTitle("모의투자")
@@ -282,7 +285,7 @@ class MainWindow(QMainWindow):
         history_layout.addWidget(history_view, 1)
         tabs.addTab(history_tab, "자산 추이")
 
-        orders_tab = QWidget()
+        orders_tab = self.orders_tab = QWidget()
         orders_layout = QVBoxLayout(orders_tab)
         orders_layout.setContentsMargins(0, 0, 0, 0)
         self.orders_table = self._table(["번호", "주문 시각", "구분", "종목", "수량", "지정가", "상태", "비고"])
@@ -293,6 +296,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(orders_tab, "지정가 주문")
 
         tabs.currentChanged.connect(lambda _: self._load_visible_tab())
+        tabs.currentChanged.connect(lambda _: self.tabs.currentWidget() is self.orders_tab and self._clear_order_badge())
         self.tabs = tabs
         return tabs
 
@@ -427,6 +431,7 @@ class MainWindow(QMainWindow):
                 held.quantity if held else 0,
                 fx_rate,
                 self.watchlist.contains(quote.symbol),
+                self.broker.pending_sell_quantity(quote.symbol),
             )
 
         self.worker.run(job, self._show_quote, self._show_error)
@@ -620,16 +625,33 @@ class MainWindow(QMainWindow):
 
         def done(events: list[OrderEvent]) -> None:
             self._orders_checking = False
+            self.load_orders()  # "확인 1회" 표시도 바로 보이게
             if events:
-                self.status.setText(" / ".join(self._describe_event(e) for e in events))
+                self._notify_order_events(events)
                 self.load_portfolio()
-                self.load_orders()
 
         def failed(message: str) -> None:
             self._orders_checking = False
             self._show_error(message)
 
         self.worker.run(self.broker.check_limit_orders, done, failed)
+
+    def _notify_order_events(self, events: list[OrderEvent]) -> None:
+        """백그라운드에서 일어난 체결·거부를 놓치지 않게: 막지 않는 알림 창과 탭 제목의 건수."""
+        text = "\n".join(self._describe_event(e) for e in events)
+        if self._order_notice is None:
+            self._order_notice = QMessageBox(QMessageBox.Information, "지정가 주문", "", QMessageBox.Ok, self)
+            self._order_notice.setTextFormat(Qt.PlainText)
+            self._order_notice.setModal(False)
+        self._order_notice.setText(text)
+        self._order_notice.show()
+        if self.tabs.currentWidget() is not self.orders_tab:
+            self._unseen_order_events += len(events)
+            self.tabs.setTabText(self.tabs.indexOf(self.orders_tab), f"지정가 주문 ({self._unseen_order_events})")
+
+    def _clear_order_badge(self) -> None:
+        self._unseen_order_events = 0
+        self.tabs.setTabText(self.tabs.indexOf(self.orders_tab), "지정가 주문")
 
     @staticmethod
     def _describe_event(event: OrderEvent) -> str:
@@ -651,6 +673,8 @@ class MainWindow(QMainWindow):
         self.orders_table.setRowCount(len(orders))
         for row, order in enumerate(orders):
             status, color = labels[order.status]
+            if order.status is OrderStatus.OPEN and order.armed:
+                status = "대기 (확인 1회)"  # 다음 확인에서도 조건이 맞으면 체결
             buy = order.side is Side.BUY
             values = [
                 _item(str(order.id), align_right=True),
@@ -691,9 +715,11 @@ class MainWindow(QMainWindow):
         message = (
             f"{quote.name} ({quote.symbol})\n"
             f"현재가 {fmt.price(quote.price, quote.currency)}\n\n"
-            f"가격이 {fmt.price(limit, quote.currency)} {condition} {quantity:,}주를 그때의 현재가로 {verb}합니다.\n"
-            f"지정가 기준 예상 금액: {fmt.won(amount)} (수수료·세금 약 {fmt.won(fee)})\n\n"
+            f"가격이 {fmt.price(limit, quote.currency)} {condition} {quantity:,}주를 지정가로 {verb}합니다.\n"
+            f"예상 금액: {fmt.won(amount)} (수수료·세금 약 {fmt.won(fee)})\n\n"
+            "앱이 켜져 있는 동안 1분마다 확인하고, 두 번 연속 조건이 맞을 때 체결합니다.\n"
             "취소할 때까지 유지되며, 체결할 때 현금이나 보유 수량이 부족하면 거부됩니다."
+            + ("\n미국 주식은 체결 때 환율이 주문 때보다 10% 넘게 다르면 체결을 미룹니다." if quote.currency is Currency.USD else "")
         )
         if not _confirm(self, f"지정가 {verb} 확인", message):
             return
@@ -731,6 +757,8 @@ class MainWindow(QMainWindow):
             f"예상 수수료·세금: {fmt.won(fee)}\n"
             + (f"적용 환율: {self.current.fx_rate:,}원/달러\n" if quote.currency.value == "USD" else "")
             + f"가격이나 환율이 {PRICE_SLIPPAGE_LIMIT}% 넘게 바뀌면 체결하지 않습니다."
+            + (f"\n\n대기 중인 지정가 판매 {self.current.pending_sell:,}주가 있습니다. 지금 팔면 그 주문은 체결 때 거부될 수 있습니다."
+               if side is Side.SELL and self.current.pending_sell else "")
         )
         if not _confirm(self, f"{verb} 확인", message):
             return
@@ -809,7 +837,10 @@ class MainWindow(QMainWindow):
         self.held_label.setText(f"{view.held:,}주 / {view.max_buy:,}주")
         if self._limit_symbol != quote.symbol:  # 같은 종목을 갱신할 때는 사용자가 입력한 지정가를 유지
             self._limit_symbol = quote.symbol
-            self.limit_price.setDecimals(0 if quote.currency is Currency.KRW else 2)
+            if quote.currency is Currency.KRW:
+                self.limit_price.setDecimals(0)
+            else:
+                self.limit_price.setDecimals(4 if quote.price < 1 else 2)  # 1달러 미만은 0.00으로 반올림되지 않게
             self.limit_price.setValue(float(quote.price))
         self._update_estimate()
         self._set_order_enabled(True)

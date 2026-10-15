@@ -141,7 +141,7 @@ class Trade:
 
 @dataclass(frozen=True)
 class LimitOrder:
-    """지정가 주문. 매수는 현재가가 지정가 이하, 매도는 이상이 되면 그때의 현재가로 체결한다."""
+    """지정가 주문. 매수는 현재가가 지정가 이하, 매도는 이상이 되면(두 번 연속 확인) 지정가로 체결한다."""
     id: int
     created_at: datetime
     symbol: str
@@ -153,6 +153,8 @@ class LimitOrder:
     status: OrderStatus
     trade_id: int | None = None
     note: str = ""
+    fx_at_order: Decimal | None = None  # 미국 주식: 주문할 때의 환율(체결 때 크게 다르면 보류)
+    armed: bool = False                 # 직전 확인에서 이미 조건이 맞았는지(두 번 연속 맞아야 체결)
 
     def is_triggered(self, price: Decimal) -> bool:
         return price <= self.limit_price if self.side is Side.BUY else price >= self.limit_price

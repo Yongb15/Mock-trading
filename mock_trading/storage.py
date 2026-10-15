@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS orders (
     status       TEXT    NOT NULL CHECK (status IN ('OPEN', 'FILLED', 'CANCELLED', 'REJECTED')),
     trade_id     INTEGER REFERENCES trades(id),
     note         TEXT    NOT NULL DEFAULT '',
-    closed_at    TEXT
+    closed_at    TEXT,
+    fx_at_order  TEXT,
+    armed        INTEGER NOT NULL DEFAULT 0 CHECK (armed IN (0, 1))
 );
 -- 관심 종목은 계좌가 아니라 사용자 설정이라 계좌를 초기화해도 남는다.
 CREATE TABLE IF NOT EXISTS watchlist (
@@ -121,6 +123,11 @@ class Repository:
         columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(account)")}
         if "generation" not in columns:
             self._conn.execute("ALTER TABLE account ADD COLUMN generation TEXT")
+        order_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(orders)")}
+        if "fx_at_order" not in order_columns:
+            self._conn.execute("ALTER TABLE orders ADD COLUMN fx_at_order TEXT")
+        if "armed" not in order_columns:
+            self._conn.execute("ALTER TABLE orders ADD COLUMN armed INTEGER NOT NULL DEFAULT 0")
 
     @_locked
     def close(self) -> None:
@@ -274,7 +281,8 @@ class Repository:
     # ---- 지정가 주문 ----
     @_locked
     def add_order(
-        self, *, symbol: str, name: str, side: Side, quantity: int, limit_price: Decimal, currency: Currency
+        self, *, symbol: str, name: str, side: Side, quantity: int, limit_price: Decimal, currency: Currency,
+        fx_at_order: Decimal | None = None,
     ) -> LimitOrder:
         if not (isinstance(limit_price, Decimal) and limit_price.is_finite() and limit_price > 0):
             raise TradingError("지정가가 올바르지 않아 주문을 저장하지 않았습니다.")
@@ -283,13 +291,20 @@ class Repository:
         created_at = datetime.now().replace(microsecond=0)
         cursor = self._conn.execute(
             """
-            INSERT INTO orders (created_at, symbol, name, side, quantity, limit_price, currency, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN')
+            INSERT INTO orders (created_at, symbol, name, side, quantity, limit_price, currency, status, fx_at_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
             """,
-            (created_at.isoformat(), symbol, name, side.value, quantity, str(limit_price), currency.value),
+            (created_at.isoformat(), symbol, name, side.value, quantity, str(limit_price), currency.value,
+             str(fx_at_order) if fx_at_order is not None else None),
         )
         return LimitOrder(cursor.lastrowid, created_at, symbol, name, side, quantity, limit_price, currency,
-                          OrderStatus.OPEN)
+                          OrderStatus.OPEN, fx_at_order=fx_at_order)
+
+    @_locked
+    def set_order_armed(self, order_id: int, armed: bool) -> None:
+        self._conn.execute(
+            "UPDATE orders SET armed = ? WHERE id = ? AND status = 'OPEN'", (1 if armed else 0, order_id)
+        )
 
     @_locked
     def orders(self, *, open_only: bool = False, limit: int = 200) -> list[LimitOrder]:
@@ -313,6 +328,8 @@ class Repository:
                     status=OrderStatus(row["status"]),
                     trade_id=row["trade_id"],
                     note=row["note"],
+                    fx_at_order=_stored_decimal(row["fx_at_order"], "주문 환율") if row["fx_at_order"] else None,
+                    armed=bool(row["armed"]),
                 ))
             except (ValueError, TypeError, LedgerError):
                 continue  # 손상된 주문은 체결하지 않는다(돈이 움직이기 전이라 건너뛰어도 안전)

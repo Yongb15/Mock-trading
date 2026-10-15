@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from .domain import (
@@ -40,6 +41,10 @@ PRICE_BAND = {
 # 지정가는 현재가의 이 범위 안에서만 받는다(자릿수를 잘못 쳐서 엉뚱한 가격에 걸어 두는 실수 방지).
 LIMIT_PRICE_BAND = (Decimal("0.5"), Decimal("1.5"))
 MAX_OPEN_ORDERS = 50
+# 미국 주식 지정가: 체결 때 환율이 주문 때보다 이만큼(%) 넘게 다르면 체결을 미룬다.
+FX_DRIFT_LIMIT = Decimal(10)
+# 지정가 확인 중 시세를 못 받은 종목은 이 시간 동안 다시 묻지 않는다(요청 제한 중 계속 두드리지 않게).
+QUOTE_RETRY_INTERVAL = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,7 @@ class Broker:
         self.repo = repo
         self.provider = provider
         self.fees = fees or FeePolicy()
+        self._quote_failed_at: dict[str, datetime] = {}  # 지정가 확인 중 시세를 못 받은 종목(잠시 다시 묻지 않음)
 
     # ---- 계좌 ----
     def open_account(self, initial_cash: Decimal | int | str) -> None:
@@ -249,20 +255,31 @@ class Broker:
             open_orders = self.repo.orders(open_only=True)
             if len(open_orders) >= MAX_OPEN_ORDERS:
                 raise TradingError(f"대기 중인 지정가 주문은 {MAX_OPEN_ORDERS}개까지 둘 수 있습니다.")
+            fx_rate = self.fx_rate_for(quote.currency)
             if side is Side.SELL:
                 # 이미 걸어 둔 매도 주문까지 합쳐 보유 수량을 넘지 않게 한다.
-                pending = sum(o.quantity for o in open_orders if o.side is Side.SELL and o.symbol == quote.symbol)
-                self._check_funds(side, quote.symbol, pending + quantity, None)
+                pending = self.pending_sell_quantity(quote.symbol, open_orders)
+                held = self.repo.ledger().holdings.get(quote.symbol)
+                held_quantity = held.quantity if held else 0
+                if pending + quantity > held_quantity:
+                    raise TradingError(
+                        f"보유 수량이 부족합니다. 주문 {quantity}주 + 대기 중인 판매 {pending}주 / 보유 {held_quantity}주"
+                    )
             else:
                 # 지정가로 샀을 때의 금액 기준으로 지금 현금으로 가능한지만 확인한다(현금을 묶어 두지는 않음 —
                 # 체결할 때 다시 확인하고, 부족하면 그때 "거부"로 닫는다).
-                fx_rate = self.fx_rate_for(quote.currency)
                 cost = krw(limit * fx_rate * quantity)
                 self._check_funds(side, quote.symbol, quantity, cost + self.fees.fee(side, quote.currency, cost))
             return self.repo.add_order(
                 symbol=quote.symbol, name=quote.name, side=side, quantity=quantity,
                 limit_price=limit, currency=quote.currency,
+                fx_at_order=fx_rate if quote.currency is Currency.USD else None,
             )
+
+    def pending_sell_quantity(self, symbol: str, open_orders: list[LimitOrder] | None = None) -> int:
+        """대기 중인 지정가 매도 수량 합계(시장가 매도 확인창 안내와 이중 매도 방지에 쓴다)."""
+        orders = self.repo.orders(open_only=True) if open_orders is None else open_orders
+        return sum(o.quantity for o in orders if o.side is Side.SELL and o.symbol == symbol)
 
     def cancel_order(self, order_id: int) -> bool:
         if isinstance(order_id, bool) or not isinstance(order_id, int):
@@ -270,41 +287,66 @@ class Broker:
         with self.repo.transaction():
             return self.repo.close_order(order_id, OrderStatus.CANCELLED, note="사용자 취소")
 
-    def check_limit_orders(self) -> list[OrderEvent]:
-        """대기 중인 주문의 시세를 확인해 조건이 맞으면 그때의 현재가로 체결한다(오래된 주문부터).
+    def check_limit_orders(self, now: datetime | None = None) -> list[OrderEvent]:
+        """대기 주문의 조건을 확인하고, 두 번 연속 맞은 주문을 지정가로 체결한다(오래된 주문부터).
 
-        시세를 못 받은 종목은 이번엔 건너뛰고 다음에 다시 확인한다.
+        - 1단계: 대기 종목 시세를 일괄 조회(get_quotes)해 조건에 맞는 주문만 고른다.
+        - 2단계: 고른 종목만 _checked_quote로 다시 확인한다(전일 종가 대비 범위, fail-closed).
+        - 처음 맞으면 "대기(확인 1회)"로 표시만 하고, 다음 확인에서도 맞으면 체결한다 — 순간적인 오류 시세 하나로
+          체결되지 않게. 체결가는 시세가 아니라 지정가라서 오류 시세가 사용자가 정한 가격보다 유리한 체결을 만들지 않는다.
+        - 미국 주식은 주문할 때의 환율과 FX_DRIFT_LIMIT % 넘게 다르면 체결을 미룬다.
         """
         if not self.repo.has_account():
             return []
+        now = now or datetime.now()
         generation = self.repo.account_generation()
         open_orders = self.repo.orders(open_only=True)
-        quotes: dict[str, Quote | None] = {}
-        fx_cache: dict[Currency, Decimal | None] = {}
+        if not open_orders:
+            return []
+        prices = self._screen_prices(open_orders, now)
+        confirmed: dict[str, Quote | None] = {}
+        fx_now: Decimal | None = None
+        fx_failed = False
         events = []
         for order in open_orders:
-            if order.symbol not in quotes:
+            price = prices.get(order.symbol)
+            if price is None:
+                continue  # 시세를 모르면 판단을 미룬다(확인 1회 표시도 그대로)
+            if not order.is_triggered(price):
+                if order.armed:
+                    self.repo.set_order_armed(order.id, False)
+                continue
+            if order.symbol not in confirmed:
                 try:
-                    quotes[order.symbol] = self._checked_quote(order.symbol)
+                    confirmed[order.symbol] = self._checked_quote(order.symbol)
                 except Exception:
-                    quotes[order.symbol] = None
-            quote = quotes[order.symbol]
+                    confirmed[order.symbol] = None
+                    self._quote_failed_at[order.symbol] = now
+            quote = confirmed[order.symbol]
             if quote is None or not order.is_triggered(quote.price):
                 continue
-            if order.currency not in fx_cache:
-                try:
-                    fx_cache[order.currency] = self.fx_rate_for(order.currency)
-                except Exception:
-                    fx_cache[order.currency] = None
-            fx_rate = fx_cache[order.currency]
-            if fx_rate is None:
+            if not order.armed:
+                self.repo.set_order_armed(order.id, True)  # 다음 확인에서도 맞으면 체결
                 continue
+            fx_rate = Decimal(1)
+            if order.currency is Currency.USD:
+                if fx_now is None and not fx_failed:
+                    try:
+                        fx_now = self.fx_rate_for(Currency.USD)
+                    except Exception:
+                        fx_failed = True
+                if fx_now is None:
+                    continue
+                if order.fx_at_order is None or abs(fx_now - order.fx_at_order) / order.fx_at_order * 100 > FX_DRIFT_LIMIT:
+                    continue  # 환율이 주문 때와 크게 달라 체결을 미룬다(오류 환율로 금액이 부풀지 않게)
+                fx_rate = fx_now
+            fill = Quote(quote.symbol, order.name, order.limit_price, order.currency, quote.previous_close)
             try:
-                amount, fee = self._amount_and_fee(order.side, quote, fx_rate, order.quantity)
+                amount, fee = self._amount_and_fee(order.side, fill, fx_rate, order.quantity)
             except TradingError:
                 continue
             try:
-                event = self._fill_order(order, quote, fx_rate, amount, fee, generation)
+                event = self._fill_order(order, fill, fx_rate, amount, fee, generation)
             except _AccountChanged:
                 break  # 확인하는 사이 계좌가 초기화됨: 남은 주문은 이미 지워졌다
             except _OrderAlreadyClosed:
@@ -312,6 +354,33 @@ class Broker:
             if event is not None:
                 events.append(event)
         return events
+
+    def _screen_prices(self, orders: list[LimitOrder], now: datetime) -> dict[str, Decimal]:
+        """조건 판단용 현재가. 일괄 조회가 되면 한 번에, 아니면 종목별로. 최근 실패한 종목은 잠시 건너뛴다."""
+        wanted = {}
+        for order in orders:
+            failed_at = self._quote_failed_at.get(order.symbol)
+            if failed_at is not None and now - failed_at < QUOTE_RETRY_INTERVAL:
+                continue
+            wanted[order.symbol] = (order.symbol, order.name, order.currency)
+        get_quotes = getattr(self.provider, "get_quotes", None)
+        prices: dict[str, Decimal] = {}
+        if get_quotes is not None:
+            try:
+                quotes = get_quotes(list(wanted.values()))
+            except Exception:
+                quotes = {}
+            prices = {symbol: q.price for symbol, q in quotes.items() if symbol in wanted}
+        else:
+            for symbol in wanted:
+                try:
+                    prices[symbol] = self.provider.get_quote(symbol).price
+                except Exception:
+                    pass
+        for symbol in wanted:
+            if symbol not in prices:
+                self._quote_failed_at[symbol] = now
+        return prices
 
     def _fill_order(
         self, order: LimitOrder, quote: Quote, fx_rate: Decimal, amount: Decimal, fee: Decimal, generation: str | None
