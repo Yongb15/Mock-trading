@@ -48,13 +48,15 @@ def _quiet_batch_failures(symbols: list[str]):
     메시지만 거른다. 레벨을 바꾸지 않으므로 다른 종목·다른 스레드(주문 경로) 로그는 그대로 남는다."""
     logger = logging.getLogger("yfinance")
     me = threading.get_ident()
-    names = tuple(symbols)
+    # 부분 문자열로 비교하면 "T"·"A" 같은 한 글자 종목 때문에 거의 모든 로그가 숨겨진다 → 코드 앞뒤 경계를 본다
+    pattern = re.compile(
+        "|".join(rf"(?<![A-Z0-9.]){re.escape(name)}(?![A-Z0-9])" for name in symbols)
+    ) if symbols else None
 
     def keep(record: logging.LogRecord) -> bool:
         if record.thread == me:
             return False
-        message = record.getMessage()
-        return not any(name in message for name in names)
+        return pattern is None or pattern.search(record.getMessage()) is None
 
     logger.addFilter(keep)
     try:

@@ -820,7 +820,7 @@ class MainWindow(QMainWindow):
         if not rows:
             self.status.setText("취소할 주문을 표에서 선택하세요.")
             return
-        # 이미 체결·취소·거부된 행은 빼고 대기 중인 주문만 센다(상태 칸: "대기" 또는 "대기 (확인 1회)").
+        # 이미 체결·취소·거부된 행은 빼고 대기 중인 주문만 센다(보이는 문구가 아니라 상태 칸에 담아 둔 값으로).
         ids = [int(self.orders_table.item(row, 0).text()) for row in rows
                if self.orders_table.item(row, 6).data(Qt.UserRole) == OrderStatus.OPEN.value]
         if not ids:

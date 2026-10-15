@@ -224,3 +224,27 @@ def test_result_is_shown_before_reloading(window, app):
         pump(app, 0.05)
     assert len(calls) == 2
     assert shown == [1, 2]                            # 두 결과 모두 표시(첫 결과를 버리지 않음)
+
+
+def test_one_letter_symbol_does_not_hide_unrelated_logs(caplog):
+    """Mock_QA: "T" 같은 한 글자 종목이 있어도 다른 종목 메시지는 숨기지 않는다(코드 경계 비교)."""
+    import logging
+
+    from mock_trading.market_data import _quiet_batch_failures
+
+    logger = logging.getLogger("yfinance")
+    done = threading.Event()
+
+    def other_thread():
+        logger.error("AAPL: Too Many Requests")   # 'T'가 들어 있지만 종목 T가 아님 → 보여야 함
+        logger.error("$T: No data found")         # 종목 T → 숨김
+        done.set()
+
+    with caplog.at_level(logging.WARNING, logger="yfinance"):
+        with _quiet_batch_failures(["T"]):
+            t = threading.Thread(target=other_thread)
+            t.start()
+            t.join()
+    messages = [r.getMessage() for r in caplog.records]
+    assert "AAPL: Too Many Requests" in messages
+    assert "$T: No data found" not in messages
