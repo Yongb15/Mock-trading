@@ -153,7 +153,7 @@ class MainWindow(QMainWindow):
     def _build_nav(self) -> QWidget:
         nav = QWidget()
         nav.setObjectName("nav")
-        nav.setFixedWidth(200)
+        nav.setFixedWidth(168)
         layout = QVBoxLayout(nav)
         layout.setContentsMargins(4, 8, 4, 8)
         layout.setSpacing(4)
@@ -235,6 +235,7 @@ class MainWindow(QMainWindow):
 
         self.name_label = _plain_label("-")
         self.name_label.setStyleSheet("font-size: 16px; font-weight: 600; color: #4E5968;")
+        self.name_label.setWordWrap(True)
         self.price_label = QLabel("-")
         self.price_label.setStyleSheet("font-size: 32px; font-weight: 800;")
         self.change_label = QLabel("")
@@ -263,6 +264,7 @@ class MainWindow(QMainWindow):
         self.limit_price = QDoubleSpinBox()
         self.limit_price.setRange(0, 1_000_000_000)
         self.limit_price.setGroupSeparatorShown(True)
+        self.limit_price.setMinimumWidth(90)  # 최대값(10억) 자릿수 때문에 칸이 넓어져 창 최소 폭을 키우지 않게
         self.limit_price.setEnabled(False)
         self.limit_price.valueChanged.connect(self._update_estimate)
         self._limit_symbol: str | None = None
@@ -274,6 +276,7 @@ class MainWindow(QMainWindow):
         form.addWidget(max_button, 1, 2)
 
         self.estimate_label = QLabel("-")
+        self.estimate_label.setWordWrap(True)
         self.held_label = QLabel("-")
         form.addWidget(QLabel("예상 금액"), 2, 0)
         form.addWidget(self.estimate_label, 2, 1, 1, 2)
@@ -300,12 +303,16 @@ class MainWindow(QMainWindow):
         self.chart.legend().hide()
         self.chart.setTitle("최근 3개월 종가")
         view = QChartView(self.chart)
+        view.setFocusPolicy(Qt.NoFocus)  # 보기만 하는 차트는 Tab 순서에서 뺀다
         view.setRenderHint(QPainter.Antialiasing)
         return view
 
     def _build_pages(self) -> QWidget:
         tabs = QTabWidget()
         tabs.tabBar().hide()  # 페이지 전환은 왼쪽 메뉴로
+        # 숨긴 탭 줄이 포커스를 받으면 Tab이 메뉴에서 빠져나가지 못한다(키보드 트랩) → 둘 다 포커스를 받지 않게
+        tabs.setFocusPolicy(Qt.NoFocus)
+        tabs.tabBar().setFocusPolicy(Qt.NoFocus)
         self.tabs = tabs
 
         # 내 계좌: 요약 카드 + 보유 종목
@@ -354,6 +361,7 @@ class MainWindow(QMainWindow):
         style_chart(self.history_chart)
         self.history_chart.setTitle("날짜별 총자산")
         history_view = QChartView(self.history_chart)
+        history_view.setFocusPolicy(Qt.NoFocus)
         history_view.setRenderHint(QPainter.Antialiasing)
         history_layout.addWidget(history_view, 1)
         tabs.addTab(history_tab, "자산 추이")

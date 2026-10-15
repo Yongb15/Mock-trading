@@ -5,6 +5,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from decimal import Decimal  # noqa: E402
 
+from PySide6.QtCore import Qt  # noqa: E402
+
 import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -97,3 +99,27 @@ def test_focus_follows_selected_menu(window, app):
     window.tabs.setCurrentWidget(window.order_page)  # 프로그램이 페이지를 바꿈
     app.processEvents()
     assert window.nav_buttons[1].hasFocus() and not window.nav_buttons[0].hasFocus()
+
+
+def test_tab_leaves_the_menu(window, app):
+    """Mock_QA N1: 선택된 메뉴에서 Tab을 누르면 메뉴가 아닌 위젯으로 간다(키보드 트랩 방지)."""
+    from PySide6.QtTest import QTest
+
+    window.show()
+    for page in (0, 1):
+        window.nav_buttons[page].click()
+        window.nav_buttons[page].setFocus()
+        app.processEvents()
+        QTest.keyClick(app.focusWidget(), Qt.Key_Tab)
+        app.processEvents()
+        assert app.focusWidget() not in window.nav_buttons
+
+
+def test_window_fits_a_small_laptop_screen(window, app):
+    """Mock_QA N2: 시세를 불러온 뒤에도 창 최소 폭이 1,000px를 넘지 않는다."""
+    window.load_quote("005930")
+    window.worker.wait(3000)
+    app.processEvents()
+    window.tabs.setCurrentWidget(window.order_page)
+    app.processEvents()
+    assert window.minimumSizeHint().width() <= 1000
