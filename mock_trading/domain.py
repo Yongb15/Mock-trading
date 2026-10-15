@@ -18,6 +18,10 @@ USD_PRICE_UNIT = Decimal("0.0001")
 FX_UNIT = Decimal("0.01")
 MAX_NAME_LENGTH = 100
 
+# 원/달러 환율이 이 범위를 벗어나면 데이터 오류로 본다.
+USD_KRW_MIN = Decimal(500)
+USD_KRW_MAX = Decimal(3000)
+
 # 한 번에 주문할 수 있는 최대 수량. 비정상적으로 큰 입력이 계산을 망가뜨리지 않게 막는다.
 MAX_ORDER_QUANTITY = 1_000_000
 

@@ -6,6 +6,8 @@ from decimal import Decimal, InvalidOperation
 
 from .domain import (
     MAX_ORDER_QUANTITY,
+    USD_KRW_MAX,
+    USD_KRW_MIN,
     Currency,
     Position,
     Quote,
@@ -32,9 +34,6 @@ PRICE_BAND = {
     Currency.USD: (Decimal(1) / 3, Decimal(3)),
 }
 
-# 원/달러 환율이 이 범위를 벗어나면 데이터 오류로 본다.
-USD_KRW_MIN = Decimal(500)
-USD_KRW_MAX = Decimal(3000)
 
 # 확인창에서 본 가격과 체결 시 가격이 이만큼(%) 넘게 다르면 다시 확인하게 한다.
 PRICE_SLIPPAGE_LIMIT = Decimal(5)

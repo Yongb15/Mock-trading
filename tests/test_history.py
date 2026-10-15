@@ -126,3 +126,128 @@ def test_yfinance_provider_daily_closes_parses_and_drops_bad_values():
     assert closes["AAPL"] == {D: Decimal("100.5"), D + timedelta(days=1): Decimal("101.0")}
     assert fx[D] == Decimal("1350.12")
     assert calls[0][1]["threads"] == 4
+
+
+# ---------------------------------------------------------------- 리뷰(8259fbf) 반영
+from mock_trading.history import DOWNLOAD_BUFFER_DAYS, REFRESH_INTERVAL, DailyCloseCache  # noqa: E402
+
+
+def test_clock_rolled_back_does_not_inflate_assets():
+    """Mock_QA H1: 시계를 되돌려 매도가 매수보다 이른 날짜로 기록돼도 장부 순서(id)대로 반영한다."""
+    buy = trade(1, D + timedelta(days=2), "A.KS", Side.BUY, 10, "1000")
+    sell = trade(2, D, "A.KS", Side.SELL, 10, "1000")  # 날짜만 거꾸로
+    closes = {"A.KS": {D + timedelta(days=n): Decimal(1000) for n in range(4)}}
+    points = asset_history(initial_cash=Decimal(100_000), trades=[sell, buy], start=D, end=D + timedelta(days=3),
+                           closes=closes, usd_krw={})
+    assert all(p.total == Decimal(100_000) for p in points)  # 사고판 값이 같으니 자산은 그대로여야 한다
+
+
+class CountingProvider:
+    def __init__(self):
+        self.calls = []
+
+    def get_daily_closes(self, symbols, start, *, include_usd_krw):
+        self.calls.append((tuple(symbols), start, include_usd_krw))
+        closes = {s: {start + timedelta(days=n): Decimal(100 + n) for n in range(3)} for s in symbols}
+        fx = {start: Decimal(1300)} if include_usd_krw else {}
+        return closes, fx
+
+
+def test_cache_downloads_history_once_and_only_recent_days_later():
+    """Mock_Sequrity A1: 과거 종가는 한 번만 받고, 10분이 지나면 최근 며칠만 다시 받는다."""
+    provider, cache = CountingProvider(), DailyCloseCache()
+    now = datetime(2026, 10, 15, 12, 0)
+    today = now.date()
+    cache.get(provider, ["A.KS", "AAPL"], D, include_fx=True, today=today, now=now)
+    cache.get(provider, ["A.KS", "AAPL"], D, include_fx=True, today=today, now=now + timedelta(minutes=5))
+    assert len(provider.calls) == 1                                   # 5분 뒤: 네트워크 없음
+    cache.get(provider, ["A.KS", "AAPL"], D, include_fx=True, today=today, now=now + REFRESH_INTERVAL)
+    assert provider.calls[1][1] == today - timedelta(days=7)          # 10분 뒤: 최근 7일만
+    cache.get(provider, ["A.KS", "AAPL", "TSLA"], D, include_fx=True, today=today, now=now + REFRESH_INTERVAL)
+    assert provider.calls[2] == (("TSLA",), D, False)                 # 새 종목만 전체 기간
+
+
+def test_cache_keeps_old_values_when_download_fails():
+    provider, cache = CountingProvider(), DailyCloseCache()
+    now = datetime(2026, 10, 15, 12, 0)
+    first, _ = cache.get(provider, ["A.KS"], D, include_fx=False, today=now.date(), now=now)
+
+    def broken(*a, **k):
+        raise RuntimeError("429")
+
+    provider.get_daily_closes = broken
+    again, _ = cache.get(provider, ["A.KS"], D, include_fx=False, today=now.date(), now=now + REFRESH_INTERVAL)
+    assert again == first
+
+
+def test_download_start_is_capped_and_buffered():
+    """Mock_Sequrity A2 / Mock_QA H4: 손상된 아주 옛날 개설일이어도 3년 + 버퍼까지만 받는다."""
+    repo = Repository()
+    repo.reset_account(Decimal(1_000_000))
+    repo._conn.execute("UPDATE account SET created_at = '0001-01-01T00:00:00'")
+    repo.add_trade(symbol="A.KS", name="A", side=Side.BUY, quantity=1, price=Decimal(100), currency=Currency.KRW,
+                   fx_rate=Decimal(1), amount_krw=Decimal(100), fee_krw=Decimal(0))
+    provider = CountingProvider()
+    today = date(2026, 10, 15)
+    points = load_asset_history(repo, provider, today, DailyCloseCache(), datetime(2026, 10, 15, 12))
+    assert provider.calls[0][1] == today - timedelta(days=MAX_HISTORY_DAYS + DOWNLOAD_BUFFER_DAYS)
+    assert len(points) == MAX_HISTORY_DAYS + 1
+
+
+def test_future_open_date_is_treated_as_today():
+    repo = Repository()
+    repo.reset_account(Decimal(1_000_000))
+    repo._conn.execute("UPDATE account SET created_at = '2999-01-01T00:00:00'")
+    points = load_asset_history(repo, CountingProvider(), date(2026, 10, 15))
+    assert [p.day for p in points] == [date(2026, 10, 15)]
+
+
+def test_fx_outliers_are_dropped():
+    """Mock_Sequrity A3"""
+    import pandas as pd
+
+    from mock_trading.market_data import USD_KRW_SYMBOL, YFinanceProvider
+
+    class FakeYF:
+        @staticmethod
+        def download(tickers, **kwargs):
+            index = pd.to_datetime(["2026-10-01", "2026-10-02", "2026-10-05"])
+            return {"Close": pd.DataFrame({"AAPL": [1.0, 1.0, 1.0], USD_KRW_SYMBOL: [1350.0, 13500.0, 120.0]}, index=index)}
+
+    provider = YFinanceProvider.__new__(YFinanceProvider)
+    provider._yf = FakeYF()
+    _, fx = provider.get_daily_closes(["AAPL"], D, include_usd_krw=True)
+    assert fx == {D: Decimal("1350.00")}
+
+
+def test_single_point_chart_and_best_worst_ignore_fallback_prices():
+    """Mock_QA H2·H3, Mock_Sequrity A3: 점이 하나여도 보이게, 최고·최저는 종가로 평가한 날만."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from mock_trading.broker import Broker
+    from mock_trading.history import AssetPoint
+    from mock_trading.ui.main_window import MainWindow
+
+    from .test_broker import FakeProvider
+
+    app = QApplication.instance() or QApplication([])
+    broker = Broker(Repository(check_same_thread=False), FakeProvider())
+    broker.open_account(1_000_000)
+    window = MainWindow(broker)
+    one = [AssetPoint(D, Decimal(1_000_000), Decimal(0), Decimal(1_000_000))]
+    window._show_asset_history(one)
+    total = window.history_chart.series()[1]
+    assert total.count() == 1 and total.pointsVisible()
+
+    points = [
+        AssetPoint(D, Decimal(900_000), Decimal(100_000), Decimal(1_000_000)),
+        AssetPoint(D + timedelta(days=1), Decimal(900_000), Decimal(900_000), Decimal(1_000_000), missing_price=True),
+        AssetPoint(D + timedelta(days=2), Decimal(900_000), Decimal(150_000), Decimal(1_000_000)),
+    ]
+    window._show_asset_history(points)
+    text = window.history_label.text()
+    assert "최고 1,050,000원" in text and "1,800,000" not in text
+    window.close()

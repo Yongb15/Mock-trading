@@ -16,6 +16,8 @@ from decimal import Decimal
 from typing import Protocol
 
 from .domain import (
+    USD_KRW_MAX,
+    USD_KRW_MIN,
     Currency,
     Quote,
     TradingError,
@@ -200,7 +202,11 @@ class YFinanceProvider:
                 except TradingError:
                     continue
             result[ticker] = daily
-        usd_krw = {d: normalize_fx(v) for d, v in result.pop(USD_KRW_SYMBOL, {}).items()}
+        usd_krw = {}
+        for day, value in result.pop(USD_KRW_SYMBOL, {}).items():
+            rate = normalize_fx(value)
+            if USD_KRW_MIN <= rate <= USD_KRW_MAX:  # 주문 경로와 같은 범위로 이상값을 버린다
+                usd_krw[day] = rate
         return result, usd_krw
 
     def get_history(self, symbol: str, period: str = "3mo") -> list[PricePoint]:

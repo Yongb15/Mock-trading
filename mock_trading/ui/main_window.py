@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from ..broker import PRICE_SLIPPAGE_LIMIT, AccountSummary, Broker
 from ..domain import MAX_ORDER_QUANTITY, Position, Quote, Side, Trade, krw
-from ..history import AssetPoint, load_asset_history
+from ..history import AssetPoint, DailyCloseCache, load_asset_history
 from ..market_data import PricePoint
 from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
@@ -110,6 +110,7 @@ class MainWindow(QMainWindow):
         self._watch_loading = False
         self._portfolio_loading = False
         self._history_loading = False
+        self._history_cache = DailyCloseCache()
 
         self.setWindowTitle("모의투자")
         self.resize(1200, 780)
@@ -257,7 +258,7 @@ class MainWindow(QMainWindow):
         history_tab = self.history_tab = QWidget()
         history_layout = QVBoxLayout(history_tab)
         history_layout.setContentsMargins(0, 0, 0, 0)
-        self.history_label = QLabel("-")
+        self.history_label = _plain_label("-")
         history_layout.addWidget(self.history_label)
         self.history_chart = QChart()
         self.history_chart.setTitle("날짜별 총자산")
@@ -410,7 +411,7 @@ class MainWindow(QMainWindow):
         self._history_loading = True
 
         def job() -> list[AssetPoint]:
-            return load_asset_history(self.broker.repo, self.broker.provider, date.today())
+            return load_asset_history(self.broker.repo, self.broker.provider, date.today(), self._history_cache)
 
         def done(points: list[AssetPoint]) -> None:
             self._history_loading = False
@@ -440,19 +441,26 @@ class MainWindow(QMainWindow):
         pen = QPen(QColor("#adb5bd"))
         pen.setStyle(Qt.DashLine)
         principal.setPen(pen)
+        if len(points) < 2:
+            total.setPointsVisible(True)  # 오늘 연 계좌는 점이 하나라 선이 그려지지 않는다
         values = []
         for point in points:
             x = QDateTime(point.day, QTime(0, 0)).toMSecsSinceEpoch()
-            total.append(x, float(point.total))
-            principal.append(x, float(point.initial_cash))
-            values += [float(point.total), float(point.initial_cash)]
+            # 원 단위는 축 숫자가 너무 길어서 만원 단위로 그린다
+            total.append(x, float(point.total) / 10_000)
+            principal.append(x, float(point.initial_cash) / 10_000)
+            values += [float(point.total) / 10_000, float(point.initial_cash) / 10_000]
         chart.addSeries(principal)
         chart.addSeries(total)
 
         x_axis = QDateTimeAxis()
-        x_axis.setFormat("MM/dd")
+        span = (points[-1].day - points[0].day).days
+        x_axis.setFormat("yy/MM/dd" if span > 365 else "MM/dd")  # 1년이 넘으면 연도까지
+        first = QDateTime(points[0].day, QTime(0, 0))
+        x_axis.setRange(first.addDays(-1), QDateTime(points[-1].day, QTime(0, 0)).addDays(1))
         y_axis = QValueAxis()
-        y_axis.setLabelFormat("%.0f")
+        y_axis.setLabelFormat("%.0f")  # 라벨 형식 문자열에는 한글을 쓸 수 없어 단위는 축 제목으로
+        y_axis.setTitleText("만원")
         padding = (max(values) - min(values)) * 0.1 or max(values) * 0.01 or 1
         y_axis.setRange(min(values) - padding, max(values) + padding)
         chart.addAxis(x_axis, Qt.AlignBottom)
@@ -461,8 +469,10 @@ class MainWindow(QMainWindow):
             series.attachAxis(x_axis)
             series.attachAxis(y_axis)
 
-        best = max(points, key=lambda p: p.total)
-        worst = min(points, key=lambda p: p.total)
+        # 최고·최저는 그날 종가로 평가한 날만으로 계산한다(대신 쓴 체결가가 튀는 값을 만들지 않게).
+        priced = [p for p in points if not p.missing_price] or points
+        best = max(priced, key=lambda p: p.total)
+        worst = min(priced, key=lambda p: p.total)
         note = "  · 종가가 없는 날은 마지막 체결가로 계산" if any(p.missing_price for p in points) else ""
         self.history_label.setText(
             f"{points[0].day:%Y-%m-%d} ~ {last.day:%Y-%m-%d}  |  현재 {fmt.won(last.total)} ({fmt.percent(last.return_rate)})"
