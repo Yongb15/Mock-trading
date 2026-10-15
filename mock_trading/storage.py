@@ -39,6 +39,13 @@ CREATE TABLE IF NOT EXISTS trades (
     amount_krw   TEXT    NOT NULL,
     fee_krw      TEXT    NOT NULL
 );
+-- 관심 종목은 계좌가 아니라 사용자 설정이라 계좌를 초기화해도 남는다.
+CREATE TABLE IF NOT EXISTS watchlist (
+    symbol    TEXT NOT NULL PRIMARY KEY,
+    name      TEXT NOT NULL,
+    currency  TEXT NOT NULL CHECK (currency IN ('KRW', 'USD')),
+    added_at  TEXT NOT NULL
+);
 """
 
 
@@ -51,6 +58,13 @@ class Ledger:
     cash: Decimal
     holdings: dict[str, Holding]
     realized_profit: Decimal
+
+
+@dataclass(frozen=True)
+class WatchItem:
+    symbol: str
+    name: str
+    currency: Currency
 
 
 def _stored_decimal(value: str, what: str) -> Decimal:
@@ -230,6 +244,56 @@ class Repository:
             )
         except (ValueError, TypeError) as error:
             raise LedgerError(f"거래 #{row['id']}의 기록이 손상되었습니다: {error}") from None
+
+    # ---- 관심 종목 ----
+    def _purge_invalid_watch(self) -> None:
+        """손상된 관심 종목 행(코드 형식·통화가 이상한 행)은 보여줄 수도 지울 수도 없으므로 정리한다."""
+        from .market_data import is_valid_symbol  # 순환 import 방지
+
+        # symbol이 NULL이면 "symbol = ?"로는 지워지지 않으므로 rowid로 지운다.
+        for row in self._conn.execute("SELECT rowid, symbol, currency FROM watchlist").fetchall():
+            if not is_valid_symbol(row["symbol"]) or row["currency"] not in ("KRW", "USD"):
+                self._conn.execute("DELETE FROM watchlist WHERE rowid = ?", (row["rowid"],))
+
+    @_locked
+    def add_watch(self, symbol: str, name: str, currency: Currency, *, limit: int) -> bool:
+        """추가하면 True, 이미 있으면 False. 개수 확인과 추가를 한 트랜잭션에서 한다."""
+        with self.transaction():
+            self._purge_invalid_watch()  # 손상된 행이 한도를 차지하지 않게
+            if self._conn.execute("SELECT 1 FROM watchlist WHERE symbol = ?", (symbol,)).fetchone():
+                return False
+            count = self._conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0]
+            if count >= limit:
+                raise TradingError(f"관심 종목은 {limit}개까지 담을 수 있습니다.")
+            self._conn.execute(
+                "INSERT INTO watchlist (symbol, name, currency, added_at) VALUES (?, ?, ?, ?)",
+                (symbol, name, currency.value, datetime.now().isoformat(timespec="seconds")),
+            )
+            return True
+
+    @_locked
+    def remove_watch(self, *symbols: str) -> bool:
+        """저장된 값과 같은 코드를 지운다(바인딩이라 어떤 문자열이든 안전). 하나라도 지웠으면 True."""
+        removed = 0
+        for symbol in symbols:
+            removed += self._conn.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol,)).rowcount
+        return removed > 0
+
+    @_locked
+    def watchlist(self) -> list[WatchItem]:
+        with self.transaction():
+            self._purge_invalid_watch()
+        rows = self._conn.execute("SELECT symbol, name, currency FROM watchlist ORDER BY added_at, symbol").fetchall()
+        items = []
+        for row in rows:
+            items.append(WatchItem(row["symbol"], row["name"], Currency(row["currency"])))
+        return items
+
+    @_locked
+    def is_watched(self, *symbols: str) -> bool:
+        return any(
+            self._conn.execute("SELECT 1 FROM watchlist WHERE symbol = ?", (s,)).fetchone() for s in symbols
+        )
 
     # ---- 장부에서 계산하는 값 ----
     @_locked

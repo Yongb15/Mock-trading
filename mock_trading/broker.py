@@ -12,6 +12,7 @@ from .domain import (
     Side,
     Trade,
     TradingError,
+    clean_name,
     krw,
     krw_floor,
     normalize_fx,
@@ -122,7 +123,7 @@ class Broker:
         low, high = PRICE_BAND[quote.currency]
         if not previous * low <= price <= previous * high:
             raise TradingError("시세가 비정상적으로 크게 변해 주문을 막았습니다. 잠시 후 다시 시도하세요.")
-        return Quote(quote.symbol, quote.name, price, quote.currency, previous)
+        return Quote(quote.symbol, clean_name(quote.name, quote.symbol), price, quote.currency, previous)
 
     # ---- 주문 ----
     def buy(self, symbol: str, quantity: int, *, expected_price: Decimal, expected_fx: Decimal | None = None) -> Trade:
