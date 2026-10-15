@@ -356,3 +356,38 @@ def test_bad_fx_at_order_time_is_rejected(provider):
     with pytest.raises(TypeError):
         plain.place_limit_order(Side.BUY, "005930", 1, Decimal("70000"))  # 확인 가격은 필수
     assert plain.repo.orders() == []
+
+
+def test_hold_reason_is_cleared_when_situation_changes(broker, provider):
+    """Mock_QA Q1: 환율 보류 문구는 환율이 정상으로 돌아오거나 조건이 풀리면 지운다."""
+    broker.place_limit_order(Side.BUY, "AAPL", 1, Decimal("201"))  # 주문 환율 1300, 조건 충족(200.50)
+    provider.usd_krw = Decimal("1500")
+    clock = Clock()
+    broker.check_limit_orders(clock.now)
+    broker.check_limit_orders(clock.tick())
+    assert "환율 변동" in broker.repo.orders(open_only=True)[0].note
+    set_price(provider, "AAPL", "250", Currency.USD)  # 조건이 풀림
+    broker.check_limit_orders(clock.tick())
+    assert broker.repo.orders(open_only=True)[0].note == ""
+
+
+def test_spin_boxes_show_their_text_with_theme():
+    """스타일시트와 함께 숫자 칸 글씨가 사라지던 문제(안쪽 입력칸 폭 1px) 회귀 방지."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QSpinBox
+
+    from mock_trading.ui.theme import apply_theme
+
+    app = QApplication.instance() or QApplication([])
+    apply_theme(app)
+    try:
+        for box in (QSpinBox(), QDoubleSpinBox()):
+            box.resize(180, 44)
+            box.show()
+            app.processEvents()
+            assert box.lineEdit().width() > 100
+            box.close()
+    finally:
+        app.setStyleSheet("")

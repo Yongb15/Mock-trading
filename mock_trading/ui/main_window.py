@@ -37,6 +37,7 @@ from ..history import AssetPoint, DailyCloseCache, load_asset_history
 from ..market_data import PricePoint
 from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
+from .theme import style_axes, style_chart
 from .worker import Worker
 
 AUTO_REFRESH_MS = 60_000
@@ -73,8 +74,9 @@ def _plain_label(text: str) -> QLabel:
 def _order_button_style(color: str) -> str:
     # 배경색을 직접 지정하면 비활성 상태도 같은 색으로 보이므로 :disabled 모양을 따로 둔다.
     return (
-        f"QPushButton {{ background: {color}; color: white; padding: 8px; font-weight: 600; }}"
-        "QPushButton:disabled { background: #ced4da; color: #6c757d; }"
+        f"QPushButton {{ background: {color}; color: white; border-radius: 14px; padding: 12px;"
+        " font-size: 16px; font-weight: 700; }"
+        "QPushButton:disabled { background: #E5E8EB; color: #8B95A1; }"
     )
 
 
@@ -142,6 +144,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
 
         self.status = _plain_label("종목 코드를 입력하세요. 예) 005930(삼성전자), AAPL")
+        self.status.setObjectName("status")
         layout.addWidget(self.status)
         self.setCentralWidget(root)
 
@@ -153,9 +156,9 @@ class MainWindow(QMainWindow):
             [("total", "총자산"), ("cash", "현금"), ("stock", "주식 평가"), ("return", "총 수익률"), ("realized", "실현 손익")]
         ):
             caption = QLabel(title)
-            caption.setStyleSheet("color: gray;")
+            caption.setObjectName("caption")
             value = QLabel("-")
-            value.setStyleSheet("font-size: 18px; font-weight: 600;")
+            value.setObjectName("heroNumber" if key == "total" else "bigNumber")
             grid.addWidget(caption, 0, column)
             grid.addWidget(value, 1, column)
             self.summary_labels[key] = value
@@ -174,7 +177,10 @@ class MainWindow(QMainWindow):
 
     def _build_quote_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setObjectName("card")  # 흰 카드(theme.py)
+        panel.setAttribute(Qt.WA_StyledBackground, True)
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(20, 18, 20, 18)
 
         search = QHBoxLayout()
         self.symbol_input = QLineEdit()
@@ -188,9 +194,9 @@ class MainWindow(QMainWindow):
         layout.addLayout(search)
 
         self.name_label = _plain_label("-")
-        self.name_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+        self.name_label.setStyleSheet("font-size: 16px; font-weight: 600; color: #4E5968;")
         self.price_label = QLabel("-")
-        self.price_label.setStyleSheet("font-size: 26px; font-weight: 700;")
+        self.price_label.setStyleSheet("font-size: 32px; font-weight: 800;")
         self.change_label = QLabel("")
         name_row = QHBoxLayout()
         name_row.addWidget(self.name_label, 1)
@@ -204,6 +210,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.change_label)
 
         order = QGroupBox("주문")
+        order.setObjectName("flat")  # 카드 안의 묶음: 테두리·배경 없이
         form = QGridLayout(order)
         self.quantity = QSpinBox()
         self.quantity.setRange(1, MAX_ORDER_QUANTITY)
@@ -249,6 +256,7 @@ class MainWindow(QMainWindow):
 
     def _build_chart(self) -> QWidget:
         self.chart = QChart()
+        style_chart(self.chart)
         self.chart.legend().hide()
         self.chart.setTitle("최근 3개월 종가")
         view = QChartView(self.chart)
@@ -279,6 +287,7 @@ class MainWindow(QMainWindow):
         self.history_label = _plain_label("-")
         history_layout.addWidget(self.history_label)
         self.history_chart = QChart()
+        style_chart(self.history_chart)
         self.history_chart.setTitle("날짜별 총자산")
         history_view = QChartView(self.history_chart)
         history_view.setRenderHint(QPainter.Antialiasing)
@@ -307,6 +316,9 @@ class MainWindow(QMainWindow):
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.verticalHeader().hide()
+        table.verticalHeader().setDefaultSectionSize(44)
+        table.setShowGrid(False)
+        table.setFocusPolicy(Qt.NoFocus)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         return table
 
@@ -502,6 +514,7 @@ class MainWindow(QMainWindow):
         for series in (principal, total):
             series.attachAxis(x_axis)
             series.attachAxis(y_axis)
+        style_axes(chart)
 
         # 최고·최저는 그날 종가로 평가한 날만으로 계산한다(대신 쓴 체결가가 튀는 값을 만들지 않게).
         priced = [p for p in points if not p.missing_price] or points
@@ -721,7 +734,7 @@ class MainWindow(QMainWindow):
             f"가격이 {fmt.price(limit, quote.currency)} {condition} {quantity:,}주를 지정가로 {verb}합니다.\n"
             f"예상 금액: {fmt.won(amount)} (수수료·세금 약 {fmt.won(fee)})\n"
             + (f"적용 환율: {self.current.fx_rate:,}원/달러 (주문 기준값으로 저장)\n" if quote.currency is Currency.USD else "")
-            + "\n앱이 켜져 있는 동안 1분마다 확인하고, 1분 이상 간격으로 두 번 연속 조건이 맞을 때 체결합니다.\n"
+            + "\n앱이 켜져 있는 동안 1분마다 확인하고, 약 1분 간격으로 두 번 연속 조건이 맞을 때 체결합니다.\n"
             "취소할 때까지 유지되며, 체결할 때 현금이나 보유 수량이 부족하면 거부됩니다."
             + ("\n미국 주식은 체결 때 환율이 주문 때보다 10% 넘게 다르면 체결을 미룹니다." if quote.currency is Currency.USD else "")
         )
@@ -891,6 +904,7 @@ class MainWindow(QMainWindow):
         self.chart.addAxis(y_axis, Qt.AlignLeft)
         series.attachAxis(x_axis)
         series.attachAxis(y_axis)
+        style_axes(self.chart)
         self.chart.setTitle(html.escape(f"{quote.name} 최근 3개월 종가"))  # QChart 제목은 HTML을 해석한다
 
     def _show_portfolio(self, view: _PortfolioView) -> None:
@@ -900,9 +914,7 @@ class MainWindow(QMainWindow):
         self.summary_labels["stock"].setText(fmt.won(summary.stock_value))
         rate = summary.total_return_rate
         self.summary_labels["return"].setText(fmt.percent(rate))
-        self.summary_labels["return"].setStyleSheet(
-            f"font-size: 18px; font-weight: 600; color: {fmt.color_for(rate)};"
-        )
+        self.summary_labels["return"].setStyleSheet(f"color: {fmt.color_for(rate)};")
         self.summary_labels["realized"].setText(fmt.signed_won(summary.realized_profit))
 
         self.holdings_table.setRowCount(len(view.positions))

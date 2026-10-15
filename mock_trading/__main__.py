@@ -8,11 +8,13 @@ from .broker import Broker
 from .market_data import YFinanceProvider
 from .storage import Repository, default_db_path
 from .ui.main_window import MainWindow
+from .ui.theme import apply_theme
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("모의투자")
+    apply_theme(app)
     # DB는 작업 스레드 하나에서만 쓰도록 Worker가 보장한다.
     repo = Repository(default_db_path(), check_same_thread=False)
     window = MainWindow(Broker(repo, YFinanceProvider()))

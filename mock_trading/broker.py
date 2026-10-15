@@ -334,6 +334,8 @@ class Broker:
             if not order.is_triggered(price):
                 if order.armed:
                     self.repo.set_order_armed(order.id, None)
+                if order.note:
+                    self.repo.set_order_note(order.id, "")  # 조건이 풀렸으니 이전 보류 이유는 지운다
                 continue
             if order.symbol not in confirmed:
                 try:
@@ -362,6 +364,8 @@ class Broker:
                 if order.fx_at_order is None:
                     self.repo.set_order_note(order.id, "주문 때 환율 기록이 없어 체결 보류 — 취소 후 다시 주문하세요")
                     continue
+                if abs(fx_now - order.fx_at_order) / order.fx_at_order * 100 <= FX_DRIFT_LIMIT and order.note:
+                    self.repo.set_order_note(order.id, "")  # 환율이 정상으로 돌아왔다
                 if abs(fx_now - order.fx_at_order) / order.fx_at_order * 100 > FX_DRIFT_LIMIT:
                     # 환율이 주문 때와 크게 달라 체결을 미룬다(오류 환율로 금액이 부풀지 않게)
                     self.repo.set_order_note(
