@@ -10,6 +10,7 @@ from PySide6.QtCore import QDateTime, Qt, QTime, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -131,24 +132,61 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 화면 구성
     def _build(self) -> None:
+        """왼쪽 메뉴 + 오른쪽 페이지. 페이지는 탭 묶음(self.tabs)에 들어 있고 탭 줄은 숨긴 채 메뉴로 바꾼다."""
         root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.addWidget(self._build_summary())
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(12, 12, 16, 12)
+        outer.setSpacing(16)
 
-        splitter = QSplitter(Qt.Vertical)
-        top = QSplitter(Qt.Horizontal)
-        top.addWidget(self._build_quote_panel())
-        top.addWidget(self._build_chart())
-        top.setSizes([380, 820])
-        splitter.addWidget(top)
-        splitter.addWidget(self._build_tables())
-        splitter.setSizes([440, 300])
-        layout.addWidget(splitter, 1)
-
+        content = QVBoxLayout()
+        content.setSpacing(8)
+        content.addWidget(self._build_pages(), 1)
         self.status = _plain_label("종목 코드를 입력하세요. 예) 005930(삼성전자), AAPL")
         self.status.setObjectName("status")
-        layout.addWidget(self.status)
+        content.addWidget(self.status)
+
+        outer.addWidget(self._build_nav())
+        outer.addLayout(content, 1)
         self.setCentralWidget(root)
+        self._sync_nav()
+
+    def _build_nav(self) -> QWidget:
+        nav = QWidget()
+        nav.setObjectName("nav")
+        nav.setFixedWidth(168)
+        layout = QVBoxLayout(nav)
+        layout.setContentsMargins(4, 8, 4, 8)
+        layout.setSpacing(4)
+        brand = QLabel("모의투자")
+        brand.setObjectName("brand")
+        layout.addWidget(brand)
+        layout.addSpacing(12)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        self.nav_buttons: list[QPushButton] = []
+        for index in range(self.tabs.count()):
+            button = QPushButton(self.tabs.tabText(index))
+            button.setObjectName("navButton")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _=False, i=index: self.tabs.setCurrentIndex(i))
+            self.nav_group.addButton(button, index)
+            self.nav_buttons.append(button)
+            layout.addWidget(button)
+        layout.addStretch(1)
+        return nav
+
+    def _sync_nav(self) -> None:
+        """메뉴 버튼의 선택 표시와 글자(지정가 주문 건수 배지 포함)를 페이지 상태에 맞춘다."""
+        if not hasattr(self, "nav_buttons"):
+            return
+        for index, button in enumerate(self.nav_buttons):
+            button.setText(self.tabs.tabText(index))
+            button.setChecked(index == self.tabs.currentIndex())
+        # 포커스가 메뉴에 있는데 다른 페이지로 바뀌었으면(표에서 종목 열기 등) 포커스도 선택된 메뉴로 옮긴다.
+        # 그대로 두면 이전 메뉴에 포커스 테두리가 남아 선택된 메뉴가 둘처럼 보인다.
+        current = self.nav_buttons[self.tabs.currentIndex()]
+        if any(b.hasFocus() for b in self.nav_buttons) and not current.hasFocus():
+            current.setFocus(Qt.OtherFocusReason)
 
     def _build_summary(self) -> QWidget:
         box = QGroupBox("내 계좌")
@@ -197,6 +235,7 @@ class MainWindow(QMainWindow):
 
         self.name_label = _plain_label("-")
         self.name_label.setStyleSheet("font-size: 16px; font-weight: 600; color: #4E5968;")
+        self.name_label.setWordWrap(True)
         self.price_label = QLabel("-")
         self.price_label.setStyleSheet("font-size: 32px; font-weight: 800;")
         self.change_label = QLabel("")
@@ -225,6 +264,7 @@ class MainWindow(QMainWindow):
         self.limit_price = QDoubleSpinBox()
         self.limit_price.setRange(0, 1_000_000_000)
         self.limit_price.setGroupSeparatorShown(True)
+        self.limit_price.setMinimumWidth(90)  # 최대값(10억) 자릿수 때문에 칸이 넓어져 창 최소 폭을 키우지 않게
         self.limit_price.setEnabled(False)
         self.limit_price.valueChanged.connect(self._update_estimate)
         self._limit_symbol: str | None = None
@@ -236,6 +276,7 @@ class MainWindow(QMainWindow):
         form.addWidget(max_button, 1, 2)
 
         self.estimate_label = QLabel("-")
+        self.estimate_label.setWordWrap(True)
         self.held_label = QLabel("-")
         form.addWidget(QLabel("예상 금액"), 2, 0)
         form.addWidget(self.estimate_label, 2, 1, 1, 2)
@@ -262,11 +303,34 @@ class MainWindow(QMainWindow):
         self.chart.legend().hide()
         self.chart.setTitle("최근 3개월 종가")
         view = QChartView(self.chart)
+        view.setFocusPolicy(Qt.NoFocus)  # 보기만 하는 차트는 Tab 순서에서 뺀다
         view.setRenderHint(QPainter.Antialiasing)
         return view
 
-    def _build_tables(self) -> QWidget:
+    def _build_pages(self) -> QWidget:
         tabs = QTabWidget()
+        tabs.tabBar().hide()  # 페이지 전환은 왼쪽 메뉴로
+        # 숨긴 탭 줄이 포커스를 받으면 Tab이 메뉴에서 빠져나가지 못한다(키보드 트랩) → 둘 다 포커스를 받지 않게
+        tabs.setFocusPolicy(Qt.NoFocus)
+        tabs.tabBar().setFocusPolicy(Qt.NoFocus)
+        self.tabs = tabs
+
+        # 내 계좌: 요약 카드 + 보유 종목
+        account_page = self.account_page = QWidget()
+        account_layout = QVBoxLayout(account_page)
+        account_layout.setContentsMargins(0, 0, 0, 0)
+        account_layout.setSpacing(12)
+        account_layout.addWidget(self._build_summary())
+        holdings_box = QGroupBox("보유 종목")
+        holdings_layout = QVBoxLayout(holdings_box)
+        holdings_layout.setContentsMargins(8, 8, 8, 8)
+
+        # 주식 주문: 시세·주문 + 차트
+        order_page = self.order_page = QSplitter(Qt.Horizontal)
+        order_page.addWidget(self._build_quote_panel())
+        order_page.addWidget(self._build_chart())
+        order_page.setSizes([400, 800])
+
         self.holdings_table = self._table(["종목", "코드", "수량", "평균 매입가", "현재가", "평가 금액", "평가 손익", "수익률"])
         # 더블클릭과 Enter 모두로 연다
         self.holdings_table.itemActivated.connect(lambda item: self._open_holding(item.row(), item.column()))
@@ -281,7 +345,10 @@ class MainWindow(QMainWindow):
         remove = QPushButton("선택한 종목 빼기 (Delete)")
         remove.clicked.connect(self._remove_selected_watch)
         watch_layout.addWidget(remove, 0, Qt.AlignRight)
-        tabs.addTab(self.holdings_table, "보유 종목")
+        holdings_layout.addWidget(self.holdings_table, 1)
+        account_layout.addWidget(holdings_box, 1)
+        tabs.addTab(account_page, "내 계좌")
+        tabs.addTab(order_page, "주식 주문")
         tabs.addTab(self.trades_table, "거래 내역")
         tabs.addTab(watch_tab, "관심 종목")
 
@@ -294,6 +361,7 @@ class MainWindow(QMainWindow):
         style_chart(self.history_chart)
         self.history_chart.setTitle("날짜별 총자산")
         history_view = QChartView(self.history_chart)
+        history_view.setFocusPolicy(Qt.NoFocus)
         history_view.setRenderHint(QPainter.Antialiasing)
         history_layout.addWidget(history_view, 1)
         tabs.addTab(history_tab, "자산 추이")
@@ -311,7 +379,7 @@ class MainWindow(QMainWindow):
 
         tabs.currentChanged.connect(lambda _: self._load_visible_tab())
         tabs.currentChanged.connect(lambda _: self.tabs.currentWidget() is self.orders_tab and self._clear_order_badge())
-        self.tabs = tabs
+        tabs.currentChanged.connect(lambda _: self._sync_nav())
         return tabs
 
     @staticmethod
@@ -601,6 +669,7 @@ class MainWindow(QMainWindow):
         self.worker.run(job, done, self._show_error)
 
     def _open_watch(self, row: int, _column: int) -> None:
+        self.tabs.setCurrentWidget(self.order_page)
         symbol = self.watch_table.item(row, 1).text()
         self.symbol_input.setText(symbol)
         self.load_quote(symbol)
@@ -668,10 +737,12 @@ class MainWindow(QMainWindow):
         if self.tabs.currentWidget() is not self.orders_tab:
             self._unseen_order_events += len(events)
             self.tabs.setTabText(self.tabs.indexOf(self.orders_tab), f"지정가 주문 ({self._unseen_order_events})")
+            self._sync_nav()
 
     def _clear_order_badge(self) -> None:
         self._unseen_order_events = 0
         self.tabs.setTabText(self.tabs.indexOf(self.orders_tab), "지정가 주문")
+        self._sync_nav()
 
     @staticmethod
     def _describe_event(event: OrderEvent) -> str:
@@ -856,6 +927,7 @@ class MainWindow(QMainWindow):
         self.sell_button.setEnabled(enabled and view.held > 0)
 
     def _open_holding(self, row: int, _column: int) -> None:
+        self.tabs.setCurrentWidget(self.order_page)
         symbol = self.holdings_table.item(row, 1).text()
         self.symbol_input.setText(symbol)
         self.load_quote(symbol)
