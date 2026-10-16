@@ -87,3 +87,12 @@ def test_leading_space_formula_is_neutralized():
     assert row[2] == "'  =1+1"
     [row] = trade_rows([trade(name="  Apple")])
     assert row[2] == "  Apple"
+
+
+def test_unicode_space_before_formula_is_neutralized():
+    """Mock_Sequrity Info: NBSP·전각 공백 뒤의 수식도 막는다."""
+    for evil in [" =1+1", "　=1+1", " @SUM(A1)"]:
+        [row] = trade_rows([trade(name=evil)])
+        assert row[2] == "'" + evil
+    [row] = trade_rows([trade(name="　삼성전자")])
+    assert row[2] == "　삼성전자"

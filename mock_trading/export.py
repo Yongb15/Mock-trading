@@ -16,8 +16,11 @@ _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 def _safe_text(value: str) -> str:
     """사람이 읽는 글자 칸(종목명·코드 등)만 보호한다. 숫자 칸은 숫자 그대로 둔다(음수 -는 숫자의 일부).
-    일부 스프레드시트는 앞 공백을 무시하고 수식으로 읽으므로 공백을 뗀 첫 글자로 판단한다."""
-    return "'" + value if value.lstrip(" ").startswith(_FORMULA_PREFIXES) else value
+    일부 스프레드시트는 앞 공백을 무시하고 수식으로 읽으므로, 모든 유니코드 공백(줄바꿈 없는 공백 U+00A0,
+    전각 공백 U+3000 등)을 뗀 첫 글자로 판단한다. 탭은 그 자체가 위험 문자라 떼기 전에 먼저 본다."""
+    if value.startswith(_FORMULA_PREFIXES) or value.lstrip().startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
 
 
 def trade_rows(trades: list[Trade]) -> list[list[str]]:
