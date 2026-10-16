@@ -59,6 +59,7 @@ from .worker import Worker
 AUTO_REFRESH_MS = 60_000
 CLOSE_WAIT_MS = 3_000
 DEFAULT_INITIAL_CASH = 10_000_000
+FIT_COLUMN_MAX = 280  # 내용에 맞추는 열의 최대 폭(긴 종목명이 다른 열을 밀어내지 않게)
 
 
 @dataclass
@@ -402,7 +403,7 @@ class MainWindow(QMainWindow):
         self.holdings_table = self._table(["종목", "코드", "수량", "평균 매입가", "현재가", "평가 금액", "평가 손익", "수익률"])
         # 더블클릭과 Enter 모두로 연다
         self.holdings_table.itemActivated.connect(lambda item: self._open_holding(item.row(), item.column()))
-        self.trades_table = self._table(["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료"])
+        self.trades_table = self._table(["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료"], fit=(0, 2))
         self.watch_table = self._table(["종목", "코드", "현재가", "전일 대비"])
         self.watch_table.itemActivated.connect(lambda item: self._open_watch(item.row(), item.column()))
         QShortcut(QKeySequence.Delete, self.watch_table, self._remove_selected_watch, context=Qt.WidgetShortcut)
@@ -445,7 +446,7 @@ class MainWindow(QMainWindow):
         orders_tab = self.orders_tab = QWidget()
         orders_layout = QVBoxLayout(orders_tab)
         orders_layout.setContentsMargins(0, 0, 0, 0)
-        self.orders_table = self._table(["번호", "주문 시각", "구분", "종목", "수량", "지정가", "상태", "비고"])
+        self.orders_table = self._table(["번호", "주문 시각", "구분", "종목", "수량", "지정가", "상태", "비고"], fit=(1, 3))
         QShortcut(QKeySequence.Delete, self.orders_table, self._cancel_selected_orders, context=Qt.WidgetShortcut)
         orders_layout.addWidget(self.orders_table, 1)
         cancel = QPushButton("선택한 대기 주문 취소 (Delete)")
@@ -459,7 +460,9 @@ class MainWindow(QMainWindow):
         return tabs
 
     @staticmethod
-    def _table(headers: list[str]) -> QTableWidget:
+    def _table(headers: list[str], *, fit: tuple[int, ...] = ()) -> QTableWidget:
+        """fit: 내용 길이에 맞출 열(시각·종목명처럼 잘리면 안 되는 열). 나머지 열은 남은 폭을 나눠 쓴다.
+        fit 열은 채운 뒤 _fit_columns로 FIT_COLUMN_MAX까지만 넓힌다(더 길면 말줄임 + 툴팁)."""
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -468,7 +471,21 @@ class MainWindow(QMainWindow):
         table.verticalHeader().setDefaultSectionSize(44)
         table.setShowGrid(False)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        for column in fit:
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Interactive)
+        table.fit_columns = fit
         return table
+
+    @staticmethod
+    def _fit_columns(table: QTableWidget) -> None:
+        for column in table.fit_columns:
+            table.resizeColumnToContents(column)
+            table.setColumnWidth(column, min(table.columnWidth(column), FIT_COLUMN_MAX))
+            for row in range(table.rowCount()):
+                item = table.item(row, column)
+                if item is not None:
+                    # 툴팁은 HTML처럼 보이면 서식으로 그리므로, 이스케이프한 뒤 태그로 감싸 글자 그대로 보이게 한다
+                    item.setToolTip("<p style='white-space:pre'>" + html.escape(item.text()) + "</p>")
 
     # ------------------------------------------------------------------ 시작 / 계좌
     def start(self) -> bool:
@@ -982,6 +999,7 @@ class MainWindow(QMainWindow):
             ]
             for column, cell in enumerate(values):
                 self.orders_table.setItem(row, column, cell)
+        self._fit_columns(self.orders_table)
 
     @staticmethod
     def _status_item(text: str, color: str, status: OrderStatus) -> QTableWidgetItem:
@@ -1245,6 +1263,7 @@ class MainWindow(QMainWindow):
             ]
             for column, item in enumerate(values):
                 self.trades_table.setItem(row, column, item)
+        self._fit_columns(self.trades_table)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
         self.timer.stop()

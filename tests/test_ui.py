@@ -153,3 +153,50 @@ def test_window_fits_a_small_laptop_screen(window, app):
     window.tabs.setCurrentWidget(window.order_page)
     app.processEvents()
     assert window.minimumSizeHint().width() <= 1000
+
+
+def test_time_and_name_columns_are_not_cut_off(window):
+    """README 화면 확인 중 발견: 주문 시각·종목명이 '2026-10-16 ...'처럼 잘리지 않게 내용 길이에 맞춘다."""
+    from PySide6.QtWidgets import QHeaderView
+
+    for table, columns in [(window.orders_table, (1, 3)), (window.trades_table, (0, 2))]:
+        header = table.horizontalHeader()
+        for column in range(table.columnCount()):
+            expected = QHeaderView.Interactive if column in columns else QHeaderView.Stretch
+            assert header.sectionResizeMode(column) == expected
+
+
+def test_long_name_is_capped_with_tooltip(window):
+    """Mock_QA RM4: 긴 종목명 하나가 다른 열을 최소 폭으로 누르지 않게 상한을 두고 전체 이름은 툴팁으로."""
+    from PySide6.QtWidgets import QTableWidgetItem
+
+    from mock_trading.ui.main_window import FIT_COLUMN_MAX
+
+    table = window.trades_table
+    table.setRowCount(1)
+    short, long = "2026-10-16 10:00:00", "SPDR S&P 500 ETF Trust Long Name " * 3
+    table.setItem(0, 0, QTableWidgetItem(short))
+    table.setItem(0, 2, QTableWidgetItem(long))
+    window._fit_columns(table)
+    assert table.columnWidth(2) == FIT_COLUMN_MAX
+    assert table.columnWidth(0) < FIT_COLUMN_MAX  # 짧은 열은 내용 폭 그대로
+    from PySide6.QtGui import QTextDocument
+
+    doc = QTextDocument()
+    doc.setHtml(table.item(0, 2).toolTip())
+    assert doc.toPlainText() == long
+
+
+def test_tooltip_does_not_render_html_from_names(window):
+    """Mock_Sequrity RM-T1: 종목명에 태그가 있어도 툴팁에서 서식·이미지로 해석하지 않고 글자 그대로 보인다."""
+    from PySide6.QtGui import QTextDocument
+    from PySide6.QtWidgets import QTableWidgetItem
+
+    table = window.orders_table
+    table.setRowCount(1)
+    name = '<b>Evil</b> <img src="file:///C:/x.png"> Corp'
+    table.setItem(0, 3, QTableWidgetItem(name))
+    window._fit_columns(table)
+    doc = QTextDocument()
+    doc.setHtml(table.item(0, 3).toolTip())
+    assert doc.toPlainText() == name
