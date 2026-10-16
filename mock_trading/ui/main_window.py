@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, Qt, QTime, QTimer
+from PySide6.QtCore import QDateTime, QStandardPaths, Qt, QTime, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -361,7 +361,7 @@ class MainWindow(QMainWindow):
         self.rank_by_group.buttonClicked.connect(self._on_rank_option)
         controls.addStretch(1)
         refresh = QPushButton("새로 받기")
-        refresh.clicked.connect(lambda: self.load_ranking(force=True))
+        refresh.clicked.connect(self._force_refresh_ranking)
         controls.addWidget(refresh)
         layout.addLayout(controls)
 
@@ -601,10 +601,15 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 내보내기
     def export_trades(self) -> None:
-        default = Path.home() / "Documents" / f"모의투자_거래내역_{date.today():%Y%m%d}.csv"
-        path, _ = QFileDialog.getSaveFileName(self, "거래 내역 내보내기", str(default), "CSV 파일 (*.csv)")
-        if not path:
+        # OneDrive가 문서 폴더를 옮겨 둔 경우에도 실제 문서 폴더를 쓴다
+        documents = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or str(Path.home())
+        dialog = QFileDialog(self, "거래 내역 내보내기", documents, "CSV 파일 (*.csv)")
+        dialog.setAcceptMode(QFileDialog.AcceptSave)
+        dialog.setDefaultSuffix("csv")  # 확장자를 안 쓰면 .csv를 붙이고, 그 경로로 덮어쓰기를 확인한다
+        dialog.selectFile(f"모의투자_거래내역_{date.today():%Y%m%d}.csv")
+        if not self._run_save_dialog(dialog):
             return
+        path = dialog.selectedFiles()[0]
 
         def job() -> int:
             try:
@@ -620,11 +625,23 @@ class MainWindow(QMainWindow):
 
         self.reader.run(job, done, failed)
 
+    @staticmethod
+    def _run_save_dialog(dialog: QFileDialog) -> bool:
+        """테스트에서 바꿔 끼울 수 있게 대화상자 실행을 한곳에."""
+        return dialog.exec() == QFileDialog.Accepted
+
     # ------------------------------------------------------------------ 시장 순위
     def _on_rank_option(self, _button=None) -> None:
         self._rank_market = Market(self.rank_market_group.checkedButton().property("value"))
         self._rank_by = RankBy(self.rank_by_group.checkedButton().property("value"))
         self.load_ranking()  # 기억해 둔 시세로 정렬만 다시(5분이 지났으면 새로 받음)
+
+    def _force_refresh_ranking(self) -> None:
+        wait = self.market_ranking.force_wait(self._rank_market)
+        if wait > 0:
+            self.status.setText(f"조금 전에 받았어요. {wait}초 뒤에 다시 받을 수 있어요.")
+            return
+        self.load_ranking(force=True)
 
     def load_ranking(self, *, force: bool = False) -> None:
         if self._rank_loading:

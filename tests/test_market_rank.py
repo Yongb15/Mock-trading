@@ -204,3 +204,20 @@ def test_ranking_reports_which_close_it_uses():
 
     result = MarketRanking(Dated()).ranking(Market.KR, RankBy.GAINERS, now=datetime(2026, 10, 16, 8))
     assert result.as_of == date(2026, 10, 15)
+
+
+def test_force_wait_tells_how_long_until_refresh_is_allowed():
+    """Mock_QA C3: "새로 받기"를 너무 빨리 다시 누르면 몇 초 남았는지 알려 줄 수 있다."""
+    ranking = MarketRanking(FlakyProvider(bad=[]))
+    now = datetime(2026, 10, 16, 10)
+    assert ranking.force_wait(Market.KR, now=now) == 0
+    ranking.ranking(Market.KR, RankBy.GAINERS, now=now)
+    assert ranking.force_wait(Market.KR, now=now + timedelta(seconds=10)) == 20
+    assert ranking.force_wait(Market.KR, now=now + FORCE_MIN_INTERVAL) == 0
+
+
+def test_retry_interval_is_shorter_than_the_refresh_timer():
+    """타이머(60초)가 조금 일찍 와도 재시도가 한 주기 밀리지 않게."""
+    from mock_trading.ui.main_window import AUTO_REFRESH_MS
+
+    assert RETRY_INTERVAL.total_seconds() * 1000 < AUTO_REFRESH_MS
