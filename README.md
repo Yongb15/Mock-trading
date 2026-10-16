@@ -12,7 +12,7 @@
 |---|---|---|
 | ![관심 종목](docs/watchlist.png) | ![자산 추이](docs/asset-history.png) | ![지정가 주문](docs/limit-order.png) |
 
-화면과 시연 GIF는 실제 시세와 임시 연습 계좌로 찍었습니다(`python packaging/make_media.py`, pillow 필요 — 실제 계좌 DB는 건드리지 않음).
+화면과 시연 GIF는 실제 시세와 임시 연습 계좌로 찍었습니다(`pip install -r requirements-build.txt` → `python packaging/make_media.py`, 실제 계좌 DB는 건드리지 않음).
 
 ## 주요 기능
 

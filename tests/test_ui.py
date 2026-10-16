@@ -162,5 +162,22 @@ def test_time_and_name_columns_are_not_cut_off(window):
     for table, columns in [(window.orders_table, (1, 3)), (window.trades_table, (0, 2))]:
         header = table.horizontalHeader()
         for column in range(table.columnCount()):
-            expected = QHeaderView.ResizeToContents if column in columns else QHeaderView.Stretch
+            expected = QHeaderView.Interactive if column in columns else QHeaderView.Stretch
             assert header.sectionResizeMode(column) == expected
+
+
+def test_long_name_is_capped_with_tooltip(window):
+    """Mock_QA RM4: 긴 종목명 하나가 다른 열을 최소 폭으로 누르지 않게 상한을 두고 전체 이름은 툴팁으로."""
+    from PySide6.QtWidgets import QTableWidgetItem
+
+    from mock_trading.ui.main_window import FIT_COLUMN_MAX
+
+    table = window.trades_table
+    table.setRowCount(1)
+    short, long = "2026-10-16 10:00:00", "SPDR S&P 500 ETF Trust Long Name " * 3
+    table.setItem(0, 0, QTableWidgetItem(short))
+    table.setItem(0, 2, QTableWidgetItem(long))
+    window._fit_columns(table)
+    assert table.columnWidth(2) == FIT_COLUMN_MAX
+    assert table.columnWidth(0) < FIT_COLUMN_MAX  # 짧은 열은 내용 폭 그대로
+    assert table.item(0, 2).toolTip() == long

@@ -59,6 +59,7 @@ from .worker import Worker
 AUTO_REFRESH_MS = 60_000
 CLOSE_WAIT_MS = 3_000
 DEFAULT_INITIAL_CASH = 10_000_000
+FIT_COLUMN_MAX = 280  # 내용에 맞추는 열의 최대 폭(긴 종목명이 다른 열을 밀어내지 않게)
 
 
 @dataclass
@@ -460,7 +461,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _table(headers: list[str], *, fit: tuple[int, ...] = ()) -> QTableWidget:
-        """fit: 내용 길이에 맞출 열(시각·종목명처럼 잘리면 안 되는 열). 나머지 열은 남은 폭을 나눠 쓴다."""
+        """fit: 내용 길이에 맞출 열(시각·종목명처럼 잘리면 안 되는 열). 나머지 열은 남은 폭을 나눠 쓴다.
+        fit 열은 채운 뒤 _fit_columns로 FIT_COLUMN_MAX까지만 넓힌다(더 길면 말줄임 + 툴팁)."""
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -470,8 +472,19 @@ class MainWindow(QMainWindow):
         table.setShowGrid(False)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for column in fit:
-            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Interactive)
+        table.fit_columns = fit
         return table
+
+    @staticmethod
+    def _fit_columns(table: QTableWidget) -> None:
+        for column in table.fit_columns:
+            table.resizeColumnToContents(column)
+            table.setColumnWidth(column, min(table.columnWidth(column), FIT_COLUMN_MAX))
+            for row in range(table.rowCount()):
+                item = table.item(row, column)
+                if item is not None:
+                    item.setToolTip(item.text())
 
     # ------------------------------------------------------------------ 시작 / 계좌
     def start(self) -> bool:
@@ -985,6 +998,7 @@ class MainWindow(QMainWindow):
             ]
             for column, cell in enumerate(values):
                 self.orders_table.setItem(row, column, cell)
+        self._fit_columns(self.orders_table)
 
     @staticmethod
     def _status_item(text: str, color: str, status: OrderStatus) -> QTableWidgetItem:
@@ -1248,6 +1262,7 @@ class MainWindow(QMainWindow):
             ]
             for column, item in enumerate(values):
                 self.trades_table.setItem(row, column, item)
+        self._fit_columns(self.trades_table)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
         self.timer.stop()

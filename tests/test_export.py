@@ -96,3 +96,12 @@ def test_unicode_space_before_formula_is_neutralized():
         assert row[2] == "'" + evil
     [row] = trade_rows([trade(name="　삼성전자")])
     assert row[2] == "　삼성전자"
+
+
+def test_invisible_format_char_before_formula_is_neutralized():
+    """Mock_Sequrity Info: 제로폭 공백·BOM 뒤의 수식도 막는다(DB를 직접 고친 행 등 clean_name을 안 거친 값 대비)."""
+    from mock_trading.export import _safe_text
+
+    for value in ["\u200b=1+1", "\ufeff+1", "\u200b \u00a0@SUM(A1)"]:
+        assert _safe_text(value) == "'" + value
+    assert _safe_text("Apple\u200bInc") == "Apple\u200bInc"

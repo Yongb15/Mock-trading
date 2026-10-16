@@ -1,6 +1,6 @@
 """README용 스크린샷과 시연 GIF를 실제 시세로 다시 만든다.
 
-    pip install pillow   # GIF를 만들 때만 필요(앱 실행에는 필요 없음)
+    pip install -r requirements-build.txt   # pillow(GIF용, 앱 실행에는 필요 없음)
     python packaging/make_media.py
 
 임시 DB(실제 계좌와 무관)에 3주 전에 연 연습 계좌와 거래 몇 건을 만든 뒤, 화면을 차례로 띄워 docs/에 저장한다.
@@ -23,7 +23,7 @@ from PySide6.QtCore import QBuffer, QIODevice  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from mock_trading.broker import Broker  # noqa: E402
-from mock_trading.domain import Currency, Side, krw  # noqa: E402
+from mock_trading.domain import Currency, Side, krw, normalize_fx, normalize_price  # noqa: E402
 from mock_trading.market_data import YFinanceProvider  # noqa: E402
 from mock_trading.storage import Repository  # noqa: E402
 from mock_trading.ui import main_window as mw  # noqa: E402
@@ -50,8 +50,12 @@ def to_pil(widget) -> Image.Image:
     return Image.open(BytesIO(bytes(buffer.data()))).convert("RGB")
 
 
-def seed_account(repo: Repository, provider: YFinanceProvider) -> None:
-    """3주 전에 2,000만 원으로 연 계좌에, 그날그날의 실제 종가로 거래 몇 건을 남긴다."""
+def seed_account(repo: Repository, provider: YFinanceProvider, broker: Broker) -> None:
+    """3주 전에 2,000만 원으로 연 계좌에, 그날그날의 실제 종가로 거래 몇 건을 남긴다.
+
+    가격·환율 단위와 수수료·거래세는 앱의 체결과 같은 규칙(normalize_*, broker.fees)을 쓰고,
+    체결일은 실제 거래일(종가가 있는 날)만 고른다 — 화면에 실제 앱에서 나올 수 없는 값이 보이지 않게.
+    """
     repo.reset_account(Decimal(20_000_000))
     start = datetime.now() - timedelta(days=21)
     repo._conn.execute("UPDATE account SET created_at = ?", (start.isoformat(timespec="seconds"),))
@@ -60,20 +64,20 @@ def seed_account(repo: Repository, provider: YFinanceProvider) -> None:
     def on(series, day):
         return [v for k, v in sorted(series.items()) if k <= day][-1]
 
-    first = max(min(closes[s]) for s in closes)
+    days = sorted(set.intersection(*(set(closes[s]) for s in closes)))  # 세 종목 모두 거래한 날
     plan = [
-        ("005930.KS", Side.BUY, 15, first, Currency.KRW),
-        ("AAPL", Side.BUY, 8, first, Currency.USD),
-        ("000660.KS", Side.BUY, 3, first + timedelta(days=3), Currency.KRW),
-        ("005930.KS", Side.SELL, 5, first + timedelta(days=9), Currency.KRW),
+        ("005930.KS", Side.BUY, 15, days[0], Currency.KRW),
+        ("AAPL", Side.BUY, 8, days[0], Currency.USD),
+        ("000660.KS", Side.BUY, 3, days[3], Currency.KRW),
+        ("005930.KS", Side.SELL, 5, days[9], Currency.KRW),
     ]
     names = {symbol: provider.get_quote(symbol).name for symbol in closes}  # 앱이 보여 주는 이름과 같게
     for symbol, side, qty, day, currency in plan:
         name = names[symbol]
-        price = on(closes[symbol], day)
-        rate = Decimal(1) if currency is Currency.KRW else on(fx, day)
+        price = normalize_price(currency, closes[symbol][day])
+        rate = Decimal(1) if currency is Currency.KRW else normalize_fx(on(fx, day))
         amount = krw(price * rate * qty)
-        fee = (amount * Decimal("0.00015")).quantize(Decimal(1))
+        fee = broker.fees.fee(side, currency, amount)
         repo.add_trade(symbol=symbol, name=name, side=side, quantity=qty, price=price, currency=currency,
                        fx_rate=rate, amount_krw=amount, fee_krw=fee,
                        executed_at=datetime.combine(day, datetime.min.time()).replace(hour=10))
@@ -90,9 +94,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         repo = Repository(Path(tmp) / "demo.db", check_same_thread=False)
         provider = YFinanceProvider()
-        seed_account(repo, provider)
-        print("seeded", flush=True)
         broker = Broker(repo, provider)
+        seed_account(repo, provider, broker)
+        print("seeded", flush=True)
         window = mw.MainWindow(broker)
         window.resize(*SIZE)
         window.show()
@@ -142,6 +146,8 @@ def main() -> int:
         settle(app, 4)
         shot(None, 1800)
         window.close()
+        window.worker.wait()  # 남은 작업이 끝난 뒤 DB를 닫아야 임시 폴더가 지워진다(Windows 파일 잠금)
+        window.reader.wait()
 
         images = [f.resize((GIF_WIDTH, int(f.height * GIF_WIDTH / f.width)), Image.LANCZOS) for f, _ in frames]
         palette = [i.quantize(colors=128, method=Image.Quantize.MEDIANCUT) for i in images]
