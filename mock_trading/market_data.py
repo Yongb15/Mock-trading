@@ -75,9 +75,10 @@ _KR_CODE = re.compile(r"\d{6}")
 
 @dataclass(frozen=True)
 class Snapshot:
-    """시세 + 마지막 거래일 거래량(모르면 None)."""
+    """시세 + 마지막 거래일 거래량(모르면 None)과 그 거래일(등락률이 어느 날 종가 기준인지)."""
     quote: Quote
     volume: int | None
+    as_of: date | None = None
 
 
 @dataclass(frozen=True)
@@ -224,7 +225,11 @@ class YFinanceProvider:
                 except Exception:
                     volume = None
             quote = Quote(symbol, clean_name(name, symbol), price, currency, previous)
-            snapshots[symbol] = Snapshot(quote, volume)
+            try:
+                as_of = series.index[-1].date()
+            except Exception:
+                as_of = None
+            snapshots[symbol] = Snapshot(quote, volume, as_of)
         return snapshots
 
     def get_daily_closes(

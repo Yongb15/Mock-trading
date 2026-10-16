@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 
@@ -15,6 +15,9 @@ from .domain import Currency
 
 # 같은 시장을 다시 받기까지의 최소 간격. 목록이 길어(시장당 30~40종목) 1분마다 받으면 요청 제한에 걸리기 쉽다.
 CACHE_TTL = timedelta(minutes=5)
+# 받기에 실패한 뒤 다시 시도하기까지, "새로 받기"를 다시 누를 수 있기까지의 최소 간격
+RETRY_INTERVAL = timedelta(minutes=1)
+FORCE_MIN_INTERVAL = timedelta(seconds=30)
 TOP_N = 20
 
 
@@ -76,9 +79,11 @@ class Ranking:
     market: Market
     by: RankBy
     rows: list[RankRow]
-    universe_size: int   # 목록 종목 수
-    priced: int          # 그중 시세를 받은 종목 수
-    fetched_at: datetime
+    universe_size: int          # 목록 종목 수
+    priced: int                 # 그중 시세를 받은 종목 수(0이면 아직 한 번도 못 받음)
+    fetched_at: datetime | None  # 이 시세를 받은 시각
+    as_of: date | None = None   # 등락률이 몇 월 며칠 종가 기준인지
+    last_failed: bool = False   # 방금 시도가 실패해 이전에 받은 값을 보여 주는 중
 
 
 def rank(snapshots: list, by: RankBy, *, top: int = TOP_N) -> list[RankRow]:
@@ -104,23 +109,44 @@ def rank(snapshots: list, by: RankBy, *, top: int = TOP_N) -> list[RankRow]:
 
 
 class MarketRanking:
-    """시장별 시세를 기억해 두고(CACHE_TTL), 기준을 바꿀 때는 다시 받지 않고 정렬만 다시 한다."""
+    """시장별 시세를 기억해 두고(CACHE_TTL), 기준을 바꿀 때는 다시 받지 않고 정렬만 다시 한다.
+
+    - 받은 값이 비어 있으면 기억하지 않는다(빈 표를 5분 동안 보여 주지 않게).
+    - 성공·실패와 관계없이 시장별로 마지막 시도 시각을 기록해, 실패 뒤에는 RETRY_INTERVAL,
+      "새로 받기"(force)는 FORCE_MIN_INTERVAL 안에 다시 요청하지 않는다(요청 제한 중 계속 두드리지 않게).
+    """
 
     def __init__(self, provider) -> None:
         self.provider = provider
         self._cache: dict[Market, tuple[datetime, list]] = {}
+        self._attempted_at: dict[Market, datetime] = {}
 
     def ranking(self, market: Market, by: RankBy, *, now: datetime | None = None, force: bool = False) -> Ranking:
         now = now or datetime.now()
         cached = self._cache.get(market)
-        if force or cached is None or now - cached[0] >= CACHE_TTL:
+        attempted = self._attempted_at.get(market)
+        expired = cached is None or now - cached[0] >= CACHE_TTL
+        min_gap = FORCE_MIN_INTERVAL if force else RETRY_INTERVAL
+        allowed = attempted is None or now - attempted >= min_gap
+        failed = False
+        if (force or expired) and allowed:
+            self._attempted_at[market] = now
             items = [(symbol, name, CURRENCY[market]) for symbol, name in UNIVERSE[market]]
-            snapshots = self._fetch(items)
-            if snapshots or cached is None:  # 이번에 하나도 못 받았으면 기억해 둔 값을 계속 쓴다
+            try:
+                snapshots = self._fetch(items)
+            except Exception:
+                snapshots = []
+            if snapshots:
                 cached = (now, snapshots)
                 self._cache[market] = cached
-        fetched_at, snapshots = cached
-        return Ranking(market, by, rank(snapshots, by), len(UNIVERSE[market]), len(snapshots), fetched_at)
+            else:
+                failed = True  # 이번엔 못 받음: 기억해 둔 값(있으면)을 그대로 보여 준다
+        fetched_at, snapshots = cached if cached else (None, [])
+        dates = [s.as_of for s in snapshots if getattr(s, "as_of", None)]
+        return Ranking(
+            market, by, rank(snapshots, by), len(UNIVERSE[market]), len(snapshots), fetched_at,
+            as_of=max(dates) if dates else None, last_failed=failed,
+        )
 
     def _fetch(self, items: list[tuple[str, str, Currency]]) -> list:
         get_snapshots = getattr(self.provider, "get_snapshots", None)

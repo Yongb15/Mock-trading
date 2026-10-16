@@ -10,7 +10,9 @@ import pytest  # noqa: E402
 
 from mock_trading.domain import Currency, Quote  # noqa: E402
 from mock_trading.market_data import Snapshot  # noqa: E402
-from mock_trading.market_rank import CACHE_TTL, UNIVERSE, Market, MarketRanking, RankBy, rank  # noqa: E402
+from mock_trading.market_rank import (  # noqa: E402
+    CACHE_TTL, FORCE_MIN_INTERVAL, RETRY_INTERVAL, UNIVERSE, Market, MarketRanking, RankBy, rank,
+)
 
 
 def snap(symbol, price, previous, volume=None, currency=Currency.KRW):
@@ -67,7 +69,9 @@ def test_cache_reuses_quotes_when_switching_criteria():
     ranking.ranking(Market.US, RankBy.GAINERS, now=now)                       # 다른 시장은 따로
     ranking.ranking(Market.KR, RankBy.GAINERS, now=now + CACHE_TTL)           # 5분 지나면 다시
     assert len(provider.calls) == 3
-    ranking.ranking(Market.KR, RankBy.GAINERS, now=now + CACHE_TTL, force=True)
+    ranking.ranking(Market.KR, RankBy.GAINERS, now=now + CACHE_TTL, force=True)   # 방금 받았으면 force도 대기
+    assert len(provider.calls) == 3
+    ranking.ranking(Market.KR, RankBy.GAINERS, now=now + CACHE_TTL + FORCE_MIN_INTERVAL, force=True)
     assert len(provider.calls) == 4
 
 
@@ -128,3 +132,75 @@ def test_rank_page_shows_rows_and_opens_stock():
     assert window.tabs.currentWidget() is window.order_page
     assert window.symbol_input.text() == window.rank_table.item(0, 2).text()
     window.close()
+
+
+
+class FlakyProvider:
+    """처음 몇 번은 비거나 예외, 그다음부터 정상."""
+    def __init__(self, bad=("empty",)):
+        self.calls, self.bad = 0, list(bad)
+
+    def get_snapshots(self, items):
+        self.calls += 1
+        if self.bad:
+            kind = self.bad.pop(0)
+            if kind == "error":
+                raise RuntimeError("429")
+            return {}
+        return {s: snap(s, "110", "100", 1, currency) for s, _, currency in items}
+
+
+def test_empty_first_fetch_is_not_cached_and_retries_after_a_minute():
+    """Mock_QA M1: 첫 조회가 비면 5분 동안 빈 표가 아니라, 1분 뒤 다시 시도해서 순위가 보인다."""
+    provider, ranking = FlakyProvider(), None
+    ranking = MarketRanking(provider)
+    now = datetime(2026, 10, 16, 10)
+    first = ranking.ranking(Market.KR, RankBy.GAINERS, now=now)
+    assert first.priced == 0 and first.last_failed
+    again = ranking.ranking(Market.KR, RankBy.GAINERS, now=now + timedelta(seconds=30))
+    assert provider.calls == 1 and again.priced == 0          # 1분 안에는 다시 두드리지 않음
+    later = ranking.ranking(Market.KR, RankBy.GAINERS, now=now + RETRY_INTERVAL)
+    assert provider.calls == 2 and later.priced > 0 and later.rows
+
+
+def test_failures_do_not_hammer_the_provider():
+    """Mock_Sequrity MR1: 실패(빈 응답·예외)해도 60초 갱신마다 다시 요청하지 않는다."""
+    provider = FlakyProvider(bad=["error"] * 100)
+    ranking = MarketRanking(provider)
+    now = datetime(2026, 10, 16, 10)
+    for second in range(0, 600, 10):  # 10분 동안 10초마다 요청
+        ranking.ranking(Market.US, RankBy.GAINERS, now=now + timedelta(seconds=second))
+    assert provider.calls == 10       # 1분에 한 번
+
+
+def test_failed_refresh_keeps_showing_old_values():
+    provider = FlakyProvider(bad=[])
+    ranking = MarketRanking(provider)
+    now = datetime(2026, 10, 16, 10)
+    ok = ranking.ranking(Market.US, RankBy.GAINERS, now=now)
+    provider.bad = ["error"]
+    stale = ranking.ranking(Market.US, RankBy.GAINERS, now=now + CACHE_TTL)
+    assert stale.priced == ok.priced and stale.last_failed and stale.fetched_at == now
+
+
+def test_force_has_a_minimum_gap():
+    """Mock_Sequrity MR2: "새로 받기" 연타는 30초에 한 번만."""
+    provider = FlakyProvider(bad=[])
+    ranking = MarketRanking(provider)
+    now = datetime(2026, 10, 16, 10)
+    for second in range(0, 30, 3):
+        ranking.ranking(Market.KR, RankBy.GAINERS, now=now + timedelta(seconds=second), force=True)
+    assert provider.calls == 1
+
+
+def test_ranking_reports_which_close_it_uses():
+    """Mock_QA M2: 받은 시각이 아니라 등락률의 기준 종가 날짜를 알려 준다."""
+    from datetime import date
+
+    class Dated:
+        def get_snapshots(self, items):
+            return {s: Snapshot(Quote(s, s, Decimal("110"), currency, Decimal("100")), 1, date(2026, 10, 15))
+                    for s, _, currency in items}
+
+    result = MarketRanking(Dated()).ranking(Market.KR, RankBy.GAINERS, now=datetime(2026, 10, 16, 8))
+    assert result.as_of == date(2026, 10, 15)
