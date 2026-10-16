@@ -153,3 +153,14 @@ def test_window_fits_a_small_laptop_screen(window, app):
     window.tabs.setCurrentWidget(window.order_page)
     app.processEvents()
     assert window.minimumSizeHint().width() <= 1000
+
+
+def test_time_and_name_columns_are_not_cut_off(window):
+    """README 화면 확인 중 발견: 주문 시각·종목명이 '2026-10-16 ...'처럼 잘리지 않게 내용 길이에 맞춘다."""
+    from PySide6.QtWidgets import QHeaderView
+
+    for table, columns in [(window.orders_table, (1, 3)), (window.trades_table, (0, 2))]:
+        header = table.horizontalHeader()
+        for column in range(table.columnCount()):
+            expected = QHeaderView.ResizeToContents if column in columns else QHeaderView.Stretch
+            assert header.sectionResizeMode(column) == expected
