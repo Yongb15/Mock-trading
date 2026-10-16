@@ -27,6 +27,12 @@
 - **자산 추이**: 계좌를 연 날부터 오늘까지 날짜별 총자산을 그래프로 봅니다. 앱을 안 켠 날도 거래 장부와 과거 종가로 다시 계산해 빈칸이 없습니다.
 - 60초마다 자동으로 갱신합니다.
 
+## 실행 파일로 받기 (Windows)
+
+Python 없이 실행하려면 [Releases](https://github.com/Yongb15/Mock-trading/releases)에서 `MockTrading-windows.zip`을 받아 압축을 풀고 `MockTrading.exe`를 실행합니다.
+직접 만들려면 아래 개발 환경을 준비한 뒤 `pip install pyinstaller` → `python packaging/build.py` (결과: `dist/MockTrading/`).
+묶인 결과가 제대로 동작하는지는 `MockTrading.exe --self-check report.txt`로 확인할 수 있습니다(화면 없이 DB·시세를 한 번씩 써 보고 결과를 파일에 씀).
+
 ## 실행 방법
 
 Python 3.11 이상이 필요합니다.
@@ -38,7 +44,7 @@ pip install -r requirements.txt
 python -m mock_trading
 ```
 
-거래 기록은 `~/.mock_trading/mock_trading.db`(SQLite)에 저장됩니다.
+거래 기록은 `~/.mock_trading/mock_trading.db`(SQLite)에 저장됩니다. 다른 위치를 쓰려면 환경 변수 `MOCK_TRADING_DB`에 파일 경로를 지정합니다.
 
 ## 테스트
 
