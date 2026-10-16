@@ -610,10 +610,17 @@ class MainWindow(QMainWindow):
 
     def _show_ranking(self, ranking: Ranking) -> None:
         market = "한국" if ranking.market is Market.KR else "미국"
-        self.rank_info.setText(
-            f"{market} 주요 종목 {ranking.universe_size}개 중 순위 (시장 전체 순위가 아님) · "
-            f"시세 {ranking.priced}개 · {ranking.fetched_at:%H:%M} 기준, 무료 시세는 약 15분 지연될 수 있어요"
-        )
+        if ranking.priced == 0:
+            # "조건에 맞는 종목 없음"과 구분: 아예 시세를 못 받은 상태
+            self.rank_info.setText("시세를 받지 못했어요. 잠시 후 자동으로 다시 시도해요.")
+        else:
+            basis = f"{ranking.as_of:%m/%d} 종가 기준" if ranking.as_of else "최근 종가 기준"
+            stale = " · 방금 새로 받지 못해 이전 값을 보여 주는 중" if ranking.last_failed else ""
+            self.rank_info.setText(
+                f"{market} 주요 종목 {ranking.universe_size}개 중 순위 (시장 전체 순위가 아님) · "
+                f"시세 {ranking.priced}개 · {basis} ({ranking.fetched_at:%H:%M}에 받음){stale} · "
+                "무료 시세는 약 15분 지연될 수 있어요"
+            )
         self.rank_table.setRowCount(len(ranking.rows))
         for row, entry in enumerate(ranking.rows):
             color = fmt.color_for(entry.change_rate)
@@ -627,7 +634,7 @@ class MainWindow(QMainWindow):
             ]
             for column, cell in enumerate(values):
                 self.rank_table.setItem(row, column, cell)
-        if not ranking.rows:
+        if not ranking.rows and ranking.priced:
             self.rank_info.setText(self.rank_info.text() + " · 조건에 맞는 종목이 없어요")
 
     def _open_ranked(self, row: int) -> None:
