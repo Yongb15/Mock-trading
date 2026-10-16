@@ -58,6 +58,15 @@ QPushButton#navButton {{
 QPushButton#navButton:hover {{ background: {LINE}; color: {TEXT}; }}
 QPushButton#navButton:checked {{ background: {CARD}; color: {TEXT}; }}
 QPushButton#navButton:focus {{ border: 2px solid {ACCENT}; }}
+QPushButton#chip {{
+    background: {CARD};
+    border: 2px solid {LINE};
+    border-radius: 18px;
+    padding: 6px 16px;
+    color: #4E5968;
+}}
+QPushButton#chip:checked {{ background: {TEXT}; border-color: {TEXT}; color: #FFFFFF; }}
+QPushButton#chip:focus {{ border-color: {ACCENT}; }}
 QPushButton {{
     background: {BACKGROUND};
     border: 2px solid transparent;

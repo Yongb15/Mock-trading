@@ -74,6 +74,13 @@ _KR_CODE = re.compile(r"\d{6}")
 
 
 @dataclass(frozen=True)
+class Snapshot:
+    """시세 + 마지막 거래일 거래량(모르면 None)."""
+    quote: Quote
+    volume: int | None
+
+
+@dataclass(frozen=True)
 class PricePoint:
     at: datetime
     close: Decimal
@@ -171,6 +178,12 @@ class YFinanceProvider:
         items: (정규화된 코드, 이름, 통화). 일봉 종가의 마지막 두 값을 현재가·전일 종가로 쓴다.
         wait: 다른 일괄 조회가 진행 중일 때 기다릴 최대 초. 넘으면 DownloadBusy(주문 대기열에서 오래 멈추지 않게).
         """
+        return {symbol: snap.quote for symbol, snap in self.get_snapshots(items, wait=wait).items()}
+
+    def get_snapshots(
+        self, items: list[tuple[str, str, Currency]], *, wait: float | None = None
+    ) -> dict[str, Snapshot]:
+        """get_quotes와 같고, 마지막 거래일의 거래량도 함께 돌려준다(시장 순위용)."""
         valid = []
         for symbol, name, currency in items:
             try:  # 손상된 코드 하나가 나머지 종목 조회까지 막지 않게 종목별로 확인
@@ -191,17 +204,28 @@ class YFinanceProvider:
         finally:
             _DOWNLOAD_LOCK.release()
         closes = frame["Close"]
-        quotes = {}
+        volumes = frame["Volume"] if "Volume" in frame else None
+        snapshots = {}
         for symbol, name, currency in items:
             try:
-                series = closes[symbol] if hasattr(closes, "columns") else closes
-                values = [positive_decimal(float(v), "종가") for v in series.dropna().tolist()[-2:]]
+                series = (closes[symbol] if hasattr(closes, "columns") else closes).dropna()
+                values = [positive_decimal(float(v), "종가") for v in series.tolist()[-2:]]
                 price = normalize_price(currency, values[-1])
                 previous = normalize_price(currency, values[-2]) if len(values) == 2 else None
             except Exception:
                 continue
-            quotes[symbol] = Quote(symbol, clean_name(name, symbol), price, currency, previous)
-        return quotes
+            volume = None
+            if volumes is not None:
+                try:
+                    column = volumes[symbol] if hasattr(volumes, "columns") else volumes
+                    raw = float(column.loc[series.index[-1]])  # 현재가로 쓴 날의 거래량
+                    if raw >= 0 and raw == raw and raw != float("inf"):
+                        volume = int(raw)
+                except Exception:
+                    volume = None
+            quote = Quote(symbol, clean_name(name, symbol), price, currency, previous)
+            snapshots[symbol] = Snapshot(quote, volume)
+        return snapshots
 
     def get_daily_closes(
         self, symbols: list[str], start: date, *, include_usd_krw: bool
