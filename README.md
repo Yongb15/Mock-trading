@@ -27,6 +27,18 @@
 - **자산 추이**: 계좌를 연 날부터 오늘까지 날짜별 총자산을 그래프로 봅니다. 앱을 안 켠 날도 거래 장부와 과거 종가로 다시 계산해 빈칸이 없습니다.
 - 60초마다 자동으로 갱신합니다.
 
+## 실행 파일로 받기 (Windows)
+
+1. **공식 [Releases](https://github.com/Yongb15/Mock-trading/releases) 페이지에서만** `MockTrading-windows.zip`과 `MockTrading-windows.zip.sha256`을 받습니다.
+2. 받은 파일이 올린 파일과 같은지 확인합니다. PowerShell에서 `Get-FileHash MockTrading-windows.zip -Algorithm SHA256` 결과가 `.sha256` 파일의 값과 같아야 합니다.
+3. 다운로드 폴더 바로 아래가 아니라 **전용 폴더**(예: `C:\Apps\MockTrading`)에 압축을 풀고 `MockTrading.exe`를 실행합니다.
+4. 서명하지 않은 실행 파일이라 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있습니다. 위 확인을 마친 이 파일에 한해 **추가 정보 → 실행**을 누르면 됩니다. SmartScreen이나 백신을 끌 필요는 없고, 끄지 마세요.
+5. 걱정되면 실행 파일 대신 아래 "실행 방법"처럼 소스에서 직접 실행할 수 있습니다.
+
+직접 만들기: 개발 환경을 준비한 뒤 `pip install -r requirements-build.txt` → `python packaging/build.py`
+(결과: `dist/MockTrading/`, 배포용 `dist/MockTrading-windows.zip`과 `.sha256`). 릴리스용은 새 가상환경에서 만드는 것을 권장합니다.
+묶인 결과는 `MockTrading.exe --self-check report.txt`로 확인할 수 있습니다(화면 없이 DB·화면 구성·시세를 한 번씩 써 보고 결과를 파일에 씀).
+
 ## 실행 방법
 
 Python 3.11 이상이 필요합니다.
@@ -38,7 +50,7 @@ pip install -r requirements.txt
 python -m mock_trading
 ```
 
-거래 기록은 `~/.mock_trading/mock_trading.db`(SQLite)에 저장됩니다.
+거래 기록은 `~/.mock_trading/mock_trading.db`(SQLite)에 저장됩니다. 다른 위치를 쓰려면 환경 변수 `MOCK_TRADING_DB`에 파일의 **절대 경로**를 지정합니다(네트워크 드라이브는 SQLite 잠금 문제로 권장하지 않음).
 
 ## 테스트
 
