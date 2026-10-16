@@ -67,7 +67,8 @@ def test_sell_disabled_without_holdings(window):
 def test_sidebar_switches_pages_and_mirrors_badge(window):
     """왼쪽 메뉴: 누르면 페이지가 바뀌고, 선택 표시와 지정가 건수 배지가 메뉴에도 보인다."""
     labels = [b.text() for b in window.nav_buttons]
-    assert labels == ["내 계좌", "주식 주문", "거래 내역", "관심 종목", "자산 추이", "지정가 주문"]
+    assert labels == ["내 계좌", "주식 주문", "시장 순위", "거래 내역", "관심 종목", "자산 추이", "지정가 주문"]
+    orders = window.tabs.indexOf(window.orders_tab)
     assert window.tabs.tabBar().isHidden()
     window.nav_buttons[1].click()
     assert window.tabs.currentWidget() is window.order_page
@@ -75,9 +76,9 @@ def test_sidebar_switches_pages_and_mirrors_badge(window):
 
     window.tabs.setTabText(window.tabs.indexOf(window.orders_tab), "지정가 주문 (2)")
     window._sync_nav()
-    assert window.nav_buttons[5].text() == "지정가 주문 (2)"
-    window.nav_buttons[5].click()
-    assert window.nav_buttons[5].text() == "지정가 주문"  # 열면 배지가 지워진다
+    assert window.nav_buttons[orders].text() == "지정가 주문 (2)"
+    window.nav_buttons[orders].click()
+    assert window.nav_buttons[orders].text() == "지정가 주문"  # 열면 배지가 지워진다
 
 
 def test_opening_a_holding_goes_to_order_page(window):
