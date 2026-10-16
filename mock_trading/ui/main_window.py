@@ -484,7 +484,8 @@ class MainWindow(QMainWindow):
             for row in range(table.rowCount()):
                 item = table.item(row, column)
                 if item is not None:
-                    item.setToolTip(item.text())
+                    # 툴팁은 HTML처럼 보이면 서식으로 그리므로, 이스케이프한 뒤 태그로 감싸 글자 그대로 보이게 한다
+                    item.setToolTip("<p style='white-space:pre'>" + html.escape(item.text()) + "</p>")
 
     # ------------------------------------------------------------------ 시작 / 계좌
     def start(self) -> bool:

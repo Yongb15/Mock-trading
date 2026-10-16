@@ -180,4 +180,23 @@ def test_long_name_is_capped_with_tooltip(window):
     window._fit_columns(table)
     assert table.columnWidth(2) == FIT_COLUMN_MAX
     assert table.columnWidth(0) < FIT_COLUMN_MAX  # 짧은 열은 내용 폭 그대로
-    assert table.item(0, 2).toolTip() == long
+    from PySide6.QtGui import QTextDocument
+
+    doc = QTextDocument()
+    doc.setHtml(table.item(0, 2).toolTip())
+    assert doc.toPlainText() == long
+
+
+def test_tooltip_does_not_render_html_from_names(window):
+    """Mock_Sequrity RM-T1: 종목명에 태그가 있어도 툴팁에서 서식·이미지로 해석하지 않고 글자 그대로 보인다."""
+    from PySide6.QtGui import QTextDocument
+    from PySide6.QtWidgets import QTableWidgetItem
+
+    table = window.orders_table
+    table.setRowCount(1)
+    name = '<b>Evil</b> <img src="file:///C:/x.png"> Corp'
+    table.setItem(0, 3, QTableWidgetItem(name))
+    window._fit_columns(table)
+    doc = QTextDocument()
+    doc.setHtml(table.item(0, 3).toolTip())
+    assert doc.toPlainText() == name

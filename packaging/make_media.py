@@ -69,7 +69,7 @@ def seed_account(repo: Repository, provider: YFinanceProvider, broker: Broker) -
         ("005930.KS", Side.BUY, 15, days[0], Currency.KRW),
         ("AAPL", Side.BUY, 8, days[0], Currency.USD),
         ("000660.KS", Side.BUY, 3, days[3], Currency.KRW),
-        ("005930.KS", Side.SELL, 5, days[9], Currency.KRW),
+        ("005930.KS", Side.SELL, 5, days[min(9, len(days) - 1)], Currency.KRW),  # 연휴가 끼어 거래일이 적어도
     ]
     names = {symbol: provider.get_quote(symbol).name for symbol in closes}  # 앱이 보여 주는 이름과 같게
     for symbol, side, qty, day, currency in plan:
