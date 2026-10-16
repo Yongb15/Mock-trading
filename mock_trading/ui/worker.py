@@ -39,9 +39,11 @@ class _Job(QRunnable):
 
 
 class Worker:
-    def __init__(self) -> None:
+    """threads=1이면 넣은 순서대로 하나씩(주문·초기화처럼 순서가 중요한 일), 2 이상이면 동시에(읽기 전용 조회)."""
+
+    def __init__(self, threads: int = 1) -> None:
         self._pool = QThreadPool()
-        self._pool.setMaxThreadCount(1)
+        self._pool.setMaxThreadCount(threads)
         self._jobs: set[_Job] = set()
 
     def run(

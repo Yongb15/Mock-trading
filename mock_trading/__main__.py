@@ -22,7 +22,7 @@ def main() -> int:
     if not window.start():  # 첫 실행에서 기초 자금 입력을 취소하면 바로 끝낸다
         return 0
     code = app.exec()
-    if window.worker.wait(0):
+    if window.worker.wait(0) and window.reader.wait(0):
         repo.close()
         return code
     # 작업 스레드가 네트워크 응답을 기다리는 중이면 QThreadPool 소멸자가 끝까지 기다려 프로세스가 남는다.

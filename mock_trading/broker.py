@@ -1,6 +1,7 @@
 """주문 처리. 수량·가격·잔고 검증은 전부 여기서 한다(화면은 입력만 넘긴다)."""
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -24,7 +25,7 @@ from .domain import (
     normalize_price,
     positive_decimal,
 )
-from .market_data import QuoteProvider, normalize_symbol
+from .market_data import DownloadBusy, QuoteProvider, normalize_symbol
 from .storage import Repository
 
 MIN_INITIAL_CASH = Decimal("100000")
@@ -43,6 +44,8 @@ LIMIT_PRICE_BAND = (Decimal("0.5"), Decimal("1.5"))
 MAX_OPEN_ORDERS = 50
 # 미국 주식 지정가: 체결 때 환율이 주문 때보다 이만큼(%) 넘게 다르면 체결을 미룬다.
 FX_DRIFT_LIMIT = Decimal(10)
+# 지정가 확인 중 다른 일괄 조회(관심 종목·자산 추이)가 다운로드를 잡고 있으면 이만큼만 기다리고 이번 주기는 넘긴다.
+SCREEN_LOCK_WAIT = 1.5
 # 지정가 두 번째 확인은 첫 확인에서 이만큼 지난 뒤여야 한다(자동 갱신 60초보다 조금 짧게 — 타이머가 조금 일찍
 # 돌아도 한 주기를 통째로 미루지 않게).
 CONFIRM_GAP = timedelta(seconds=50)
@@ -400,7 +403,13 @@ class Broker:
         prices: dict[str, Decimal] = {}
         if get_quotes is not None:
             try:
-                quotes = get_quotes(list(wanted.values()))
+                if "wait" in inspect.signature(get_quotes).parameters:
+                    # 관심 종목·자산 추이 다운로드가 잡고 있으면 오래 기다리지 않는다(주문 대기열이 막히지 않게)
+                    quotes = get_quotes(list(wanted.values()), wait=SCREEN_LOCK_WAIT)
+                else:
+                    quotes = get_quotes(list(wanted.values()))
+            except DownloadBusy:
+                return {}  # 실패가 아니라 "이번엔 못 봄": 실패 기록 없이 다음 주기에 다시(확인 1회 표시도 그대로)
             except Exception:
                 quotes = {}
             prices = {symbol: q.price for symbol, q in quotes.items() if symbol in wanted}

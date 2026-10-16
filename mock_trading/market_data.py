@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -29,21 +30,42 @@ from .domain import (
 
 USD_KRW_SYMBOL = "KRW=X"
 
+class DownloadBusy(Exception):
+    """다른 일괄 조회가 진행 중이라 이번엔 조회하지 않았다(실패가 아니다 — 다음에 다시 하면 된다)."""
+
+
+# yf.download는 모듈 전역 상태를 쓰므로 두 스레드에서 동시에 부르면 결과가 섞일 수 있다 → 한 번에 하나씩.
+_DOWNLOAD_LOCK = threading.Lock()
+
 # 일괄 조회 때 동시에 보내는 요청 수 상한. 너무 많이 몰리면 Yahoo가 요청을 제한(429)해 주문용 시세까지 실패할 수 있다.
 DOWNLOAD_THREADS = 4
 
 
 @contextmanager
-def _quiet_batch_failures():
-    """일괄 조회에서는 yfinance가 실패한 종목을 stderr에 찍는다. 실패는 결과에서 빠지는 것으로 드러나므로
-    이 구간에서만 조용히 하고, 주문 경로(get_quote·환율)의 로그는 그대로 둔다."""
+def _quiet_batch_failures(symbols: list[str]):
+    """일괄 조회에서 yfinance는 실패한 종목을 stderr에 찍는다(종목별 오류는 yfinance 내부 스레드에서).
+    실패는 결과에서 빠지는 것으로 드러나므로, 이 구간 동안 이 스레드의 요약 메시지와 **이번 조회 종목**이 들어간
+    메시지만 거른다. 레벨을 바꾸지 않으므로 다른 종목·다른 스레드(주문 경로) 로그는 그대로 남는다."""
     logger = logging.getLogger("yfinance")
-    previous = logger.level
-    logger.setLevel(logging.CRITICAL)
+    me = threading.get_ident()
+    # 부분 문자열로 비교하면 "T"·"A" 같은 한 글자 종목 때문에 거의 모든 로그가 숨겨진다 → 코드 앞뒤 경계를 본다
+    pattern = re.compile(
+        # 앞뒤가 영문자(대·소문자)·숫자·코드 기호(. = -)가 아니어야 종목 코드로 본다: "Too Many"의 T는 종목 T가 아니다
+        r"(?<![A-Za-z0-9.=\-])(?:" + "|".join(map(re.escape, symbols)) + r")(?![A-Za-z0-9.=\-])"
+    ) if symbols else None
+
+    def keep(record: logging.LogRecord) -> bool:
+        if record.thread == me:
+            return False
+        return pattern is None or pattern.search(record.getMessage()) is None
+
+    logger.addFilter(keep)
     try:
         yield
     finally:
-        logger.setLevel(previous)
+        logger.removeFilter(keep)
+
+
 HISTORY_PERIODS = frozenset({"1mo", "3mo", "6mo", "1y", "5y"})
 
 # 허용하는 종목 코드 형태. 임의 문자열이 외부 API 요청으로 그대로 나가지 않게 한다.
@@ -141,12 +163,13 @@ class YFinanceProvider:
     def get_usd_krw(self) -> Decimal:
         return normalize_fx(positive_decimal(self._yf.Ticker(USD_KRW_SYMBOL).fast_info.last_price, "환율"))
 
-    def get_quotes(self, items: list[tuple[str, str, Currency]]) -> dict[str, Quote]:
+    def get_quotes(self, items: list[tuple[str, str, Currency]], *, wait: float | None = None) -> dict[str, Quote]:
         """관심 종목처럼 여러 종목을 한 번의 호출로 조회한다. 실패한 종목은 결과에서 빠진다.
 
         yfinance는 내부적으로 종목마다 요청을 보내므로(최대 DOWNLOAD_THREADS개씩 병렬) 종목 수만큼 요청이 나간다.
         종목별 fast_info + info 조회보다는 훨씬 가볍다.
         items: (정규화된 코드, 이름, 통화). 일봉 종가의 마지막 두 값을 현재가·전일 종가로 쓴다.
+        wait: 다른 일괄 조회가 진행 중일 때 기다릴 최대 초. 넘으면 DownloadBusy(주문 대기열에서 오래 멈추지 않게).
         """
         valid = []
         for symbol, name, currency in items:
@@ -158,10 +181,15 @@ class YFinanceProvider:
         symbols = [symbol for symbol, _, _ in items]
         if not symbols:
             return {}
-        with _quiet_batch_failures():
-            frame = self._yf.download(
-                symbols, period="5d", progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS
-            )
+        if not _DOWNLOAD_LOCK.acquire(timeout=-1 if wait is None else wait):
+            raise DownloadBusy()
+        try:
+            with _quiet_batch_failures(symbols):
+                frame = self._yf.download(
+                    symbols, period="5d", progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS
+                )
+        finally:
+            _DOWNLOAD_LOCK.release()
         closes = frame["Close"]
         quotes = {}
         for symbol, name, currency in items:
@@ -184,7 +212,7 @@ class YFinanceProvider:
             tickers.append(USD_KRW_SYMBOL)
         if not tickers:
             return {}, {}
-        with _quiet_batch_failures():
+        with _DOWNLOAD_LOCK, _quiet_batch_failures(tickers):
             frame = self._yf.download(
                 tickers, start=start.isoformat(), progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS
             )

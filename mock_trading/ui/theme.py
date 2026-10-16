@@ -45,6 +45,19 @@ QGroupBox::title {{
 QGroupBox#flat {{ background: transparent; padding: 38px 0 0 0; }}
 QGroupBox#flat::title {{ left: 0; top: 8px; }}
 QWidget#card {{ background: {CARD}; border-radius: 20px; }}
+QLabel#brand {{ font-size: 19px; font-weight: 800; padding: 6px 12px; }}
+QPushButton#navButton {{
+    background: transparent;
+    text-align: left;
+    padding: 11px 14px;
+    border-radius: 12px;
+    color: #4E5968;
+    font-size: 15px;
+    font-weight: 700;
+}}
+QPushButton#navButton:hover {{ background: {LINE}; color: {TEXT}; }}
+QPushButton#navButton:checked {{ background: {CARD}; color: {TEXT}; }}
+QPushButton#navButton:focus {{ border: 2px solid {ACCENT}; }}
 QPushButton {{
     background: {BACKGROUND};
     border: 2px solid transparent;

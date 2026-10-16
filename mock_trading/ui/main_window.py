@@ -10,6 +10,7 @@ from PySide6.QtCore import QDateTime, Qt, QTime, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -109,7 +110,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.broker = broker
         self.watchlist = watchlist or Watchlist(broker.repo, broker.provider)
+        # 주문·초기화·계좌·시세처럼 순서가 중요한 일은 한 줄로, 관심 종목·자산 추이처럼 읽기만 하는 느린 조회는
+        # 따로 돌려 주문이 그 뒤에서 기다리지 않게 한다(DB는 Repository 잠금으로 직렬화된다).
         self.worker = Worker()
+        self.reader = Worker(threads=2)
+        self._view_generation = 0  # 계좌를 초기화할 때마다 올린다 → 초기화 전에 시작한 조회 결과는 버린다
         self.current: _QuoteView | None = None
         self._order_pending = False
         self._reset_pending = False
@@ -117,6 +122,8 @@ class MainWindow(QMainWindow):
         self._watch_loading = False
         self._portfolio_loading = False
         self._history_loading = False
+        self._history_reload = False
+        self._watch_reload = False
         self._orders_checking = False
         self._unseen_order_events = 0
         self._order_notice: QMessageBox | None = None
@@ -131,24 +138,61 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 화면 구성
     def _build(self) -> None:
+        """왼쪽 메뉴 + 오른쪽 페이지. 페이지는 탭 묶음(self.tabs)에 들어 있고 탭 줄은 숨긴 채 메뉴로 바꾼다."""
         root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.addWidget(self._build_summary())
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(12, 12, 16, 12)
+        outer.setSpacing(16)
 
-        splitter = QSplitter(Qt.Vertical)
-        top = QSplitter(Qt.Horizontal)
-        top.addWidget(self._build_quote_panel())
-        top.addWidget(self._build_chart())
-        top.setSizes([380, 820])
-        splitter.addWidget(top)
-        splitter.addWidget(self._build_tables())
-        splitter.setSizes([440, 300])
-        layout.addWidget(splitter, 1)
-
+        content = QVBoxLayout()
+        content.setSpacing(8)
+        content.addWidget(self._build_pages(), 1)
         self.status = _plain_label("종목 코드를 입력하세요. 예) 005930(삼성전자), AAPL")
         self.status.setObjectName("status")
-        layout.addWidget(self.status)
+        content.addWidget(self.status)
+
+        outer.addWidget(self._build_nav())
+        outer.addLayout(content, 1)
         self.setCentralWidget(root)
+        self._sync_nav()
+
+    def _build_nav(self) -> QWidget:
+        nav = QWidget()
+        nav.setObjectName("nav")
+        nav.setFixedWidth(168)
+        layout = QVBoxLayout(nav)
+        layout.setContentsMargins(4, 8, 4, 8)
+        layout.setSpacing(4)
+        brand = QLabel("모의투자")
+        brand.setObjectName("brand")
+        layout.addWidget(brand)
+        layout.addSpacing(12)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        self.nav_buttons: list[QPushButton] = []
+        for index in range(self.tabs.count()):
+            button = QPushButton(self.tabs.tabText(index))
+            button.setObjectName("navButton")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _=False, i=index: self.tabs.setCurrentIndex(i))
+            self.nav_group.addButton(button, index)
+            self.nav_buttons.append(button)
+            layout.addWidget(button)
+        layout.addStretch(1)
+        return nav
+
+    def _sync_nav(self) -> None:
+        """메뉴 버튼의 선택 표시와 글자(지정가 주문 건수 배지 포함)를 페이지 상태에 맞춘다."""
+        if not hasattr(self, "nav_buttons"):
+            return
+        for index, button in enumerate(self.nav_buttons):
+            button.setText(self.tabs.tabText(index))
+            button.setChecked(index == self.tabs.currentIndex())
+        # 포커스가 메뉴에 있는데 다른 페이지로 바뀌었으면(표에서 종목 열기 등) 포커스도 선택된 메뉴로 옮긴다.
+        # 그대로 두면 이전 메뉴에 포커스 테두리가 남아 선택된 메뉴가 둘처럼 보인다.
+        current = self.nav_buttons[self.tabs.currentIndex()]
+        if any(b.hasFocus() for b in self.nav_buttons) and not current.hasFocus():
+            current.setFocus(Qt.OtherFocusReason)
 
     def _build_summary(self) -> QWidget:
         box = QGroupBox("내 계좌")
@@ -197,6 +241,7 @@ class MainWindow(QMainWindow):
 
         self.name_label = _plain_label("-")
         self.name_label.setStyleSheet("font-size: 16px; font-weight: 600; color: #4E5968;")
+        self.name_label.setWordWrap(True)
         self.price_label = QLabel("-")
         self.price_label.setStyleSheet("font-size: 32px; font-weight: 800;")
         self.change_label = QLabel("")
@@ -225,6 +270,7 @@ class MainWindow(QMainWindow):
         self.limit_price = QDoubleSpinBox()
         self.limit_price.setRange(0, 1_000_000_000)
         self.limit_price.setGroupSeparatorShown(True)
+        self.limit_price.setMinimumWidth(90)  # 최대값(10억) 자릿수 때문에 칸이 넓어져 창 최소 폭을 키우지 않게
         self.limit_price.setEnabled(False)
         self.limit_price.valueChanged.connect(self._update_estimate)
         self._limit_symbol: str | None = None
@@ -236,6 +282,7 @@ class MainWindow(QMainWindow):
         form.addWidget(max_button, 1, 2)
 
         self.estimate_label = QLabel("-")
+        self.estimate_label.setWordWrap(True)
         self.held_label = QLabel("-")
         form.addWidget(QLabel("예상 금액"), 2, 0)
         form.addWidget(self.estimate_label, 2, 1, 1, 2)
@@ -262,11 +309,34 @@ class MainWindow(QMainWindow):
         self.chart.legend().hide()
         self.chart.setTitle("최근 3개월 종가")
         view = QChartView(self.chart)
+        view.setFocusPolicy(Qt.NoFocus)  # 보기만 하는 차트는 Tab 순서에서 뺀다
         view.setRenderHint(QPainter.Antialiasing)
         return view
 
-    def _build_tables(self) -> QWidget:
+    def _build_pages(self) -> QWidget:
         tabs = QTabWidget()
+        tabs.tabBar().hide()  # 페이지 전환은 왼쪽 메뉴로
+        # 숨긴 탭 줄이 포커스를 받으면 Tab이 메뉴에서 빠져나가지 못한다(키보드 트랩) → 둘 다 포커스를 받지 않게
+        tabs.setFocusPolicy(Qt.NoFocus)
+        tabs.tabBar().setFocusPolicy(Qt.NoFocus)
+        self.tabs = tabs
+
+        # 내 계좌: 요약 카드 + 보유 종목
+        account_page = self.account_page = QWidget()
+        account_layout = QVBoxLayout(account_page)
+        account_layout.setContentsMargins(0, 0, 0, 0)
+        account_layout.setSpacing(12)
+        account_layout.addWidget(self._build_summary())
+        holdings_box = QGroupBox("보유 종목")
+        holdings_layout = QVBoxLayout(holdings_box)
+        holdings_layout.setContentsMargins(8, 8, 8, 8)
+
+        # 주식 주문: 시세·주문 + 차트
+        order_page = self.order_page = QSplitter(Qt.Horizontal)
+        order_page.addWidget(self._build_quote_panel())
+        order_page.addWidget(self._build_chart())
+        order_page.setSizes([400, 800])
+
         self.holdings_table = self._table(["종목", "코드", "수량", "평균 매입가", "현재가", "평가 금액", "평가 손익", "수익률"])
         # 더블클릭과 Enter 모두로 연다
         self.holdings_table.itemActivated.connect(lambda item: self._open_holding(item.row(), item.column()))
@@ -281,7 +351,10 @@ class MainWindow(QMainWindow):
         remove = QPushButton("선택한 종목 빼기 (Delete)")
         remove.clicked.connect(self._remove_selected_watch)
         watch_layout.addWidget(remove, 0, Qt.AlignRight)
-        tabs.addTab(self.holdings_table, "보유 종목")
+        holdings_layout.addWidget(self.holdings_table, 1)
+        account_layout.addWidget(holdings_box, 1)
+        tabs.addTab(account_page, "내 계좌")
+        tabs.addTab(order_page, "주식 주문")
         tabs.addTab(self.trades_table, "거래 내역")
         tabs.addTab(watch_tab, "관심 종목")
 
@@ -294,6 +367,7 @@ class MainWindow(QMainWindow):
         style_chart(self.history_chart)
         self.history_chart.setTitle("날짜별 총자산")
         history_view = QChartView(self.history_chart)
+        history_view.setFocusPolicy(Qt.NoFocus)
         history_view.setRenderHint(QPainter.Antialiasing)
         history_layout.addWidget(history_view, 1)
         tabs.addTab(history_tab, "자산 추이")
@@ -311,7 +385,7 @@ class MainWindow(QMainWindow):
 
         tabs.currentChanged.connect(lambda _: self._load_visible_tab())
         tabs.currentChanged.connect(lambda _: self.tabs.currentWidget() is self.orders_tab and self._clear_order_badge())
-        self.tabs = tabs
+        tabs.currentChanged.connect(lambda _: self._sync_nav())
         return tabs
 
     @staticmethod
@@ -374,6 +448,7 @@ class MainWindow(QMainWindow):
 
         def done(_: object) -> None:
             self._reset_pending = False
+            self._view_generation += 1
             self.current = None
             self._set_order_enabled(False)
             self.status.setText(f"계좌를 {fmt.won(Decimal(amount))}으로 초기화했습니다.")
@@ -455,21 +530,31 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ 자산 추이
     def load_asset_history(self) -> None:
         if self._history_loading:
+            self._history_reload = True  # 진행 중인 조회는 이 요청 전 상태일 수 있으니 끝나면 한 번 더
             return
         self._history_loading = True
+
+        generation = self._view_generation
 
         def job() -> list[AssetPoint]:
             return load_asset_history(self.broker.repo, self.broker.provider, date.today(), self._history_cache)
 
         def done(points: list[AssetPoint]) -> None:
             self._history_loading = False
-            self._show_asset_history(points)
+            if generation != self._view_generation:
+                self._load_visible_tab()  # 초기화 전 계좌의 결과 → 버리고 새 계좌로 다시
+                return
+            self._show_asset_history(points)  # 받은 결과는 먼저 보여 주고
+            if self._history_reload:          # 그 사이 들어온 요청이 있었으면 한 번 더
+                self._history_reload = False
+                self.load_asset_history()
 
         def failed(message: str) -> None:
             self._history_loading = False
+            self._history_reload = False
             self._show_error(message)
 
-        self.worker.run(job, done, failed)
+        self.reader.run(job, done, failed)
 
     def _show_asset_history(self, points: list[AssetPoint]) -> None:
         chart = self.history_chart
@@ -533,19 +618,29 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 관심 종목
     def load_watchlist(self) -> None:
-        if self._watch_loading:  # 직전 갱신이 아직 대기열에 있으면 또 넣지 않는다
+        if self._watch_loading:  # 직전 갱신이 아직 진행 중이면 또 넣지 않고, 끝난 뒤 한 번 더
+            self._watch_reload = True
             return
         self._watch_loading = True
 
+        generation = self._view_generation
+
         def done(rows: list[WatchRow]) -> None:
             self._watch_loading = False
+            if generation != self._view_generation:
+                self._load_visible_tab()
+                return
             self._show_watchlist(rows)
+            if self._watch_reload:
+                self._watch_reload = False
+                self.load_watchlist()
 
         def failed(message: str) -> None:
             self._watch_loading = False
+            self._watch_reload = False
             self._show_error(message)
 
-        self.worker.run(self.watchlist.rows, done, failed)
+        self.reader.run(self.watchlist.rows, done, failed)
 
     def toggle_watch(self) -> None:
         if not self.current:
@@ -601,6 +696,7 @@ class MainWindow(QMainWindow):
         self.worker.run(job, done, self._show_error)
 
     def _open_watch(self, row: int, _column: int) -> None:
+        self.tabs.setCurrentWidget(self.order_page)
         symbol = self.watch_table.item(row, 1).text()
         self.symbol_input.setText(symbol)
         self.load_quote(symbol)
@@ -646,6 +742,7 @@ class MainWindow(QMainWindow):
             if events:
                 self._notify_order_events(events)
                 self.load_portfolio()
+                self._load_visible_tab()  # 자산 추이를 보고 있었다면 방금 체결도 그래프에
 
         def failed(message: str) -> None:
             self._orders_checking = False
@@ -668,10 +765,12 @@ class MainWindow(QMainWindow):
         if self.tabs.currentWidget() is not self.orders_tab:
             self._unseen_order_events += len(events)
             self.tabs.setTabText(self.tabs.indexOf(self.orders_tab), f"지정가 주문 ({self._unseen_order_events})")
+            self._sync_nav()
 
     def _clear_order_badge(self) -> None:
         self._unseen_order_events = 0
         self.tabs.setTabText(self.tabs.indexOf(self.orders_tab), "지정가 주문")
+        self._sync_nav()
 
     @staticmethod
     def _describe_event(event: OrderEvent) -> str:
@@ -703,17 +802,29 @@ class MainWindow(QMainWindow):
                 _item(f"{order.name} ({order.symbol})"),
                 _item(f"{order.quantity:,}", align_right=True),
                 _item(fmt.price(order.limit_price, order.currency), align_right=True),
-                _item(status, color=color),
+                self._status_item(status, color, order.status),
                 _item(order.note),
             ]
             for column, cell in enumerate(values):
                 self.orders_table.setItem(row, column, cell)
 
+    @staticmethod
+    def _status_item(text: str, color: str, status: OrderStatus) -> QTableWidgetItem:
+        """보이는 문구와 별개로 실제 상태 값을 담아 둔다(문구를 바꿔도 취소 판단이 흔들리지 않게)."""
+        item = _item(text, color=color)
+        item.setData(Qt.UserRole, status.value)
+        return item
+
     def _cancel_selected_orders(self) -> None:
         rows = sorted({index.row() for index in self.orders_table.selectedIndexes()})
-        ids = [int(self.orders_table.item(row, 0).text()) for row in rows]
-        if not ids:
+        if not rows:
             self.status.setText("취소할 주문을 표에서 선택하세요.")
+            return
+        # 이미 체결·취소·거부된 행은 빼고 대기 중인 주문만 센다(보이는 문구가 아니라 상태 칸에 담아 둔 값으로).
+        ids = [int(self.orders_table.item(row, 0).text()) for row in rows
+               if self.orders_table.item(row, 6).data(Qt.UserRole) == OrderStatus.OPEN.value]
+        if not ids:
+            self.status.setText("선택한 주문 중 대기 중인 주문이 없습니다.")
             return
         # Delete 키 하나로 되돌릴 수 없는 취소가 일어나지 않게 확인한다(관심 종목 빼기는 다시 담으면 되니 확인 없음).
         if not _confirm(self, "대기 주문 취소", f"선택한 대기 주문 {len(ids)}건을 취소할까요?"):
@@ -856,6 +967,7 @@ class MainWindow(QMainWindow):
         self.sell_button.setEnabled(enabled and view.held > 0)
 
     def _open_holding(self, row: int, _column: int) -> None:
+        self.tabs.setCurrentWidget(self.order_page)
         symbol = self.holdings_table.item(row, 1).text()
         self.symbol_input.setText(symbol)
         self.load_quote(symbol)
@@ -962,4 +1074,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
         self.timer.stop()
         self.worker.wait(CLOSE_WAIT_MS)  # 네트워크가 끊겨도 닫기가 멈추지 않게
+        self.reader.wait(CLOSE_WAIT_MS)
         super().closeEvent(event)
