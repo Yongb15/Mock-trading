@@ -2,6 +2,7 @@
 
 한 파일(--onefile)로 묶으면 실행할 때마다 Qt를 임시 폴더에 풀어서 느리므로 폴더로 만든다.
 """
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -30,7 +31,16 @@ def main() -> int:
         str(ROOT / "packaging" / "run_app.py"),
     ]
     print(" ".join(command))
-    return subprocess.call(command, cwd=ROOT)
+    code = subprocess.call(command, cwd=ROOT)
+    if code != 0:
+        return code
+    # 배포용 zip과 무결성 확인용 SHA-256
+    archive = shutil.make_archive(str(ROOT / "dist" / "MockTrading-windows"), "zip", ROOT / "dist", "MockTrading")
+    digest = hashlib.sha256(Path(archive).read_bytes()).hexdigest()
+    checksum = Path(archive).with_suffix(".zip.sha256")
+    checksum.write_text(f"{digest}  {Path(archive).name}\n", encoding="ascii")
+    print(f"{archive}\nSHA-256 {digest}")
+    return 0
 
 
 if __name__ == "__main__":

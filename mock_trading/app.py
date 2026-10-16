@@ -1,6 +1,7 @@
 """앱 시작: 화면 띄우기, 자가 점검(--self-check). 실행은 `python -m mock_trading` 또는 실행 파일."""
 import os
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
@@ -13,25 +14,43 @@ from .ui.theme import apply_theme
 
 
 def self_check(report: str) -> int:
-    """실행 파일이 제대로 묶였는지 확인: 화면을 띄우지 않고 DB·시세·화면 모듈을 한 번씩 써 보고 결과를 파일에 쓴다.
+    """실행 파일이 제대로 묶였는지 확인하고 결과를 파일에 쓴다(창 모드 실행 파일은 콘솔 출력이 없어서).
 
-    창 모드 실행 파일은 콘솔 출력이 없어서 결과를 파일로 남긴다. 실제 계좌 DB는 건드리지 않는다(메모리 DB).
+    단계: db(메모리 DB, 실제 계좌는 건드리지 않음) → gui(QApplication과 메인 창·차트를 실제로 만들어
+    Qt 플랫폼·차트 플러그인이 묶였는지 확인, 창은 띄우지 않음) → quote(네트워크).
+    종료 코드: 0 = db·gui 정상, 1 = db·gui 실패, 2 = 결과 파일을 쓰지 못함. 네트워크가 없어서 quote만 실패하면
+    SKIPPED로 적고 0(묶음 자체는 정상이므로).
     """
-    lines = []
+    lines: list[str] = []
+    code = 0
     try:
-        from .market_data import YFinanceProvider as Provider
-        from .ui.main_window import MainWindow as _Window  # noqa: F401  화면 모듈이 묶였는지
-
-        repo = Repository()  # 메모리 DB
-        repo.reset_account(__import__("decimal").Decimal(1_000_000))
+        repo = Repository()
+        repo.reset_account(Decimal("1000000"))
         lines.append(f"db ok cash={repo.cash()}")
-        quote = Provider().get_quote("AAPL")
-        lines.append(f"quote ok {quote.symbol} {quote.price} {quote.currency.value}")
-        code = 0
-    except Exception as error:  # 어떤 단계에서 실패했는지 남긴다
+
+        from PySide6.QtCharts import QChart
+
+        from . import market_data
+
+        qt_app = QApplication.instance() or QApplication([])
+        provider = market_data.YFinanceProvider()
+        window = MainWindow(Broker(repo, provider))
+        QChart()
+        lines.append(f"gui ok platform={qt_app.platformName()}")
+        window.deleteLater()
+    except Exception as error:  # 묶음이 깨진 경우: 어느 단계인지 남긴다
         lines.append(f"FAILED {type(error).__name__}: {error}")
         code = 1
-    Path(report).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        try:
+            quote = provider.get_quote("AAPL")
+            lines.append(f"quote ok {quote.symbol} {quote.price} {quote.currency.value}")
+        except Exception as error:
+            lines.append(f"SKIPPED(network) {type(error).__name__}: {error}")
+    try:
+        Path(report).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        return 2
     return code
 
 
