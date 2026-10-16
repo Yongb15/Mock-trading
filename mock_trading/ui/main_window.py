@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from datetime import date
 from dataclasses import dataclass
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, Qt, QTime, QTimer
+from PySide6.QtCore import QDateTime, QStandardPaths, Qt, QTime, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QComboBox,
+    QFileDialog,
     QDoubleSpinBox,
     QSpinBox,
     QSplitter,
@@ -33,9 +35,22 @@ from PySide6.QtWidgets import (
 )
 
 from ..broker import PRICE_SLIPPAGE_LIMIT, AccountSummary, Broker, OrderEvent
-from ..domain import MAX_ORDER_QUANTITY, Currency, LimitOrder, OrderStatus, Position, Quote, Side, Trade, krw
+from ..domain import (
+    MAX_ORDER_QUANTITY,
+    Currency,
+    LimitOrder,
+    OrderStatus,
+    Position,
+    Quote,
+    Side,
+    Trade,
+    TradingError,
+    krw,
+)
 from ..history import AssetPoint, DailyCloseCache, load_asset_history
 from ..market_data import PricePoint
+from ..export import write_trades_csv
+from ..market_rank import Market, MarketRanking, RankBy, Ranking
 from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
 from .theme import style_axes, style_chart
@@ -110,6 +125,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.broker = broker
         self.watchlist = watchlist or Watchlist(broker.repo, broker.provider)
+        self.market_ranking = MarketRanking(broker.provider)
         # 주문·초기화·계좌·시세처럼 순서가 중요한 일은 한 줄로, 관심 종목·자산 추이처럼 읽기만 하는 느린 조회는
         # 따로 돌려 주문이 그 뒤에서 기다리지 않게 한다(DB는 Repository 잠금으로 직렬화된다).
         self.worker = Worker()
@@ -124,6 +140,10 @@ class MainWindow(QMainWindow):
         self._history_loading = False
         self._history_reload = False
         self._watch_reload = False
+        self._rank_loading = False
+        self._rank_reload = False
+        self._rank_market = Market.KR
+        self._rank_by = RankBy.GAINERS
         self._orders_checking = False
         self._unseen_order_events = 0
         self._order_notice: QMessageBox | None = None
@@ -313,6 +333,48 @@ class MainWindow(QMainWindow):
         view.setRenderHint(QPainter.Antialiasing)
         return view
 
+    def _build_rank_page(self) -> QWidget:
+        page = self.rank_page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        controls = QHBoxLayout()
+        self.rank_market_group = QButtonGroup(self)
+        self.rank_by_group = QButtonGroup(self)
+        for group, options, current in (
+            (self.rank_market_group, [(Market.KR, "한국"), (Market.US, "미국")], self._rank_market),
+            (self.rank_by_group, [(RankBy.GAINERS, "급상승"), (RankBy.LOSERS, "급하락"), (RankBy.VOLUME, "거래량")],
+             self._rank_by),
+        ):
+            group.setExclusive(True)
+            for value, label in options:
+                button = QPushButton(label)
+                button.setObjectName("chip")
+                button.setCheckable(True)
+                button.setChecked(value is current)
+                button.setProperty("value", value.value)
+                group.addButton(button)
+                controls.addWidget(button)
+            controls.addSpacing(16)
+        self.rank_market_group.buttonClicked.connect(self._on_rank_option)
+        self.rank_by_group.buttonClicked.connect(self._on_rank_option)
+        controls.addStretch(1)
+        refresh = QPushButton("새로 받기")
+        refresh.clicked.connect(self._force_refresh_ranking)
+        controls.addWidget(refresh)
+        layout.addLayout(controls)
+
+        self.rank_info = _plain_label("-")
+        self.rank_info.setObjectName("caption")
+        self.rank_info.setWordWrap(True)
+        layout.addWidget(self.rank_info)
+
+        self.rank_table = self._table(["순위", "종목", "코드", "현재가", "전일 대비", "거래량"])
+        self.rank_table.itemActivated.connect(lambda item: self._open_ranked(item.row()))
+        layout.addWidget(self.rank_table, 1)
+        return page
+
     def _build_pages(self) -> QWidget:
         tabs = QTabWidget()
         tabs.tabBar().hide()  # 페이지 전환은 왼쪽 메뉴로
@@ -355,7 +417,15 @@ class MainWindow(QMainWindow):
         account_layout.addWidget(holdings_box, 1)
         tabs.addTab(account_page, "내 계좌")
         tabs.addTab(order_page, "주식 주문")
-        tabs.addTab(self.trades_table, "거래 내역")
+        tabs.addTab(self._build_rank_page(), "시장 순위")
+        trades_page = self.trades_page = QWidget()
+        trades_layout = QVBoxLayout(trades_page)
+        trades_layout.setContentsMargins(0, 0, 0, 0)
+        trades_layout.addWidget(self.trades_table, 1)
+        export = QPushButton("CSV로 내보내기")
+        export.clicked.connect(self.export_trades)
+        trades_layout.addWidget(export, 0, Qt.AlignRight)
+        tabs.addTab(trades_page, "거래 내역")
         tabs.addTab(watch_tab, "관심 종목")
 
         history_tab = self.history_tab = QWidget()
@@ -484,6 +554,8 @@ class MainWindow(QMainWindow):
             self.load_watchlist()
         elif current is self.history_tab:
             self.load_asset_history()
+        elif current is self.rank_page:
+            self.load_ranking()
 
     def load_portfolio(self) -> None:
         if self._portfolio_loading:  # 직전 갱신이 아직 대기열에 있으면 또 넣지 않는다(느린 네트워크에서 쌓임 방지)
@@ -526,6 +598,109 @@ class MainWindow(QMainWindow):
             )
 
         self.worker.run(job, self._show_quote, self._show_error)
+
+    # ------------------------------------------------------------------ 내보내기
+    def export_trades(self) -> None:
+        # OneDrive가 문서 폴더를 옮겨 둔 경우에도 실제 문서 폴더를 쓴다
+        documents = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or str(Path.home())
+        dialog = QFileDialog(self, "거래 내역 내보내기", documents, "CSV 파일 (*.csv)")
+        dialog.setAcceptMode(QFileDialog.AcceptSave)
+        dialog.setDefaultSuffix("csv")  # 확장자를 안 쓰면 .csv를 붙이고, 그 경로로 덮어쓰기를 확인한다
+        dialog.selectFile(f"모의투자_거래내역_{date.today():%Y%m%d}.csv")
+        if not self._run_save_dialog(dialog):
+            return
+        path = dialog.selectedFiles()[0]
+
+        def job() -> int:
+            try:
+                return write_trades_csv(self.broker.repo.trades(), path)
+            except OSError:
+                raise TradingError("파일을 저장할 수 없습니다. 같은 파일이 엑셀 등에서 열려 있지 않은지, 저장 위치를 확인하세요.") from None
+
+        def done(count: int) -> None:
+            self.status.setText(f"거래 {count}건을 내보냈습니다: {path}")
+
+        def failed(message: str) -> None:
+            _warn(self, "내보내기 실패", message)
+
+        self.reader.run(job, done, failed)
+
+    @staticmethod
+    def _run_save_dialog(dialog: QFileDialog) -> bool:
+        """테스트에서 바꿔 끼울 수 있게 대화상자 실행을 한곳에."""
+        return dialog.exec() == QFileDialog.Accepted
+
+    # ------------------------------------------------------------------ 시장 순위
+    def _on_rank_option(self, _button=None) -> None:
+        self._rank_market = Market(self.rank_market_group.checkedButton().property("value"))
+        self._rank_by = RankBy(self.rank_by_group.checkedButton().property("value"))
+        self.load_ranking()  # 기억해 둔 시세로 정렬만 다시(5분이 지났으면 새로 받음)
+
+    def _force_refresh_ranking(self) -> None:
+        wait = self.market_ranking.force_wait(self._rank_market)
+        if wait > 0:
+            self.status.setText(f"조금 전에 받았어요. {wait}초 뒤에 다시 받을 수 있어요.")
+            return
+        self.load_ranking(force=True)
+
+    def load_ranking(self, *, force: bool = False) -> None:
+        if self._rank_loading:
+            self._rank_reload = True
+            return
+        self._rank_loading = True
+        market, by = self._rank_market, self._rank_by
+        self.rank_info.setText("시세를 받는 중...")
+
+        def done(ranking: Ranking) -> None:
+            self._rank_loading = False
+            if (ranking.market, ranking.by) == (self._rank_market, self._rank_by):
+                self._show_ranking(ranking)
+            if self._rank_reload or (ranking.market, ranking.by) != (self._rank_market, self._rank_by):
+                self._rank_reload = False
+                self.load_ranking()  # 그 사이 시장·기준을 바꿨으면 바뀐 것으로 한 번 더
+
+        def failed(message: str) -> None:
+            self._rank_loading = False
+            self._rank_reload = False
+            self.rank_info.setText(message)
+
+        # 느린 일괄 조회라 주문 대기열이 아니라 읽기 전용 작업 풀에서
+        self.reader.run(lambda: self.market_ranking.ranking(market, by, force=force), done, failed)
+
+    def _show_ranking(self, ranking: Ranking) -> None:
+        market = "한국" if ranking.market is Market.KR else "미국"
+        if ranking.priced == 0:
+            # "조건에 맞는 종목 없음"과 구분: 아예 시세를 못 받은 상태
+            self.rank_info.setText("시세를 받지 못했어요. 잠시 후 자동으로 다시 시도해요.")
+        else:
+            basis = f"{ranking.as_of:%m/%d} 종가 기준" if ranking.as_of else "최근 종가 기준"
+            stale = " · 방금 새로 받지 못해 이전 값을 보여 주는 중" if ranking.last_failed else ""
+            self.rank_info.setText(
+                f"{market} 주요 종목 {ranking.universe_size}개 중 순위 (시장 전체 순위가 아님) · "
+                f"시세 {ranking.priced}개 · {basis} ({ranking.fetched_at:%H:%M}에 받음){stale} · "
+                "무료 시세는 약 15분 지연될 수 있어요"
+            )
+        self.rank_table.setRowCount(len(ranking.rows))
+        for row, entry in enumerate(ranking.rows):
+            color = fmt.color_for(entry.change_rate)
+            values = [
+                _item(str(entry.rank), align_right=True),
+                _item(entry.name),
+                _item(entry.symbol),
+                _item(fmt.price(entry.price, entry.currency), align_right=True),
+                _item(fmt.percent(entry.change_rate), align_right=True, color=color),
+                _item(f"{entry.volume:,}" if entry.volume is not None else "-", align_right=True),
+            ]
+            for column, cell in enumerate(values):
+                self.rank_table.setItem(row, column, cell)
+        if not ranking.rows and ranking.priced:
+            self.rank_info.setText(self.rank_info.text() + " · 조건에 맞는 종목이 없어요")
+
+    def _open_ranked(self, row: int) -> None:
+        symbol = self.rank_table.item(row, 2).text()
+        self.tabs.setCurrentWidget(self.order_page)
+        self.symbol_input.setText(symbol)
+        self.load_quote(symbol)
 
     # ------------------------------------------------------------------ 자산 추이
     def load_asset_history(self) -> None:

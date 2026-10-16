@@ -7,3 +7,6 @@ __pycache__/
 data/
 build/
 dist/
+
+# PyInstaller가 만드는 설정 파일(빌드 스크립트가 매번 다시 만든다)
+*.spec

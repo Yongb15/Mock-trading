@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import uuid
@@ -93,6 +94,11 @@ def _stored_decimal(value: str, what: str) -> Decimal:
 
 
 def default_db_path() -> Path:
+    """기본은 ~/.mock_trading/mock_trading.db. 환경 변수 MOCK_TRADING_DB로 바꿀 수 있다(시험 실행·여러 계좌 연습용)."""
+    override = os.environ.get("MOCK_TRADING_DB")
+    if override:
+        # 상대 경로면 실행한 폴더에 따라 다른 DB가 열려 계좌가 사라진 것처럼 보이므로 절대 경로로
+        return Path(override).expanduser().resolve()
     return Path.home() / ".mock_trading" / "mock_trading.db"
 
 
