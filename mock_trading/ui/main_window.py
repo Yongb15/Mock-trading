@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from datetime import date
 from dataclasses import dataclass
 from decimal import Decimal
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QComboBox,
+    QFileDialog,
     QDoubleSpinBox,
     QSpinBox,
     QSplitter,
@@ -33,9 +35,21 @@ from PySide6.QtWidgets import (
 )
 
 from ..broker import PRICE_SLIPPAGE_LIMIT, AccountSummary, Broker, OrderEvent
-from ..domain import MAX_ORDER_QUANTITY, Currency, LimitOrder, OrderStatus, Position, Quote, Side, Trade, krw
+from ..domain import (
+    MAX_ORDER_QUANTITY,
+    Currency,
+    LimitOrder,
+    OrderStatus,
+    Position,
+    Quote,
+    Side,
+    Trade,
+    TradingError,
+    krw,
+)
 from ..history import AssetPoint, DailyCloseCache, load_asset_history
 from ..market_data import PricePoint
+from ..export import write_trades_csv
 from ..market_rank import Market, MarketRanking, RankBy, Ranking
 from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
@@ -404,7 +418,14 @@ class MainWindow(QMainWindow):
         tabs.addTab(account_page, "내 계좌")
         tabs.addTab(order_page, "주식 주문")
         tabs.addTab(self._build_rank_page(), "시장 순위")
-        tabs.addTab(self.trades_table, "거래 내역")
+        trades_page = self.trades_page = QWidget()
+        trades_layout = QVBoxLayout(trades_page)
+        trades_layout.setContentsMargins(0, 0, 0, 0)
+        trades_layout.addWidget(self.trades_table, 1)
+        export = QPushButton("CSV로 내보내기")
+        export.clicked.connect(self.export_trades)
+        trades_layout.addWidget(export, 0, Qt.AlignRight)
+        tabs.addTab(trades_page, "거래 내역")
         tabs.addTab(watch_tab, "관심 종목")
 
         history_tab = self.history_tab = QWidget()
@@ -577,6 +598,27 @@ class MainWindow(QMainWindow):
             )
 
         self.worker.run(job, self._show_quote, self._show_error)
+
+    # ------------------------------------------------------------------ 내보내기
+    def export_trades(self) -> None:
+        default = Path.home() / "Documents" / f"모의투자_거래내역_{date.today():%Y%m%d}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "거래 내역 내보내기", str(default), "CSV 파일 (*.csv)")
+        if not path:
+            return
+
+        def job() -> int:
+            try:
+                return write_trades_csv(self.broker.repo.trades(), path)
+            except OSError:
+                raise TradingError("파일을 저장할 수 없습니다. 같은 파일이 엑셀 등에서 열려 있지 않은지, 저장 위치를 확인하세요.") from None
+
+        def done(count: int) -> None:
+            self.status.setText(f"거래 {count}건을 내보냈습니다: {path}")
+
+        def failed(message: str) -> None:
+            _warn(self, "내보내기 실패", message)
+
+        self.reader.run(job, done, failed)
 
     # ------------------------------------------------------------------ 시장 순위
     def _on_rank_option(self, _button=None) -> None:
