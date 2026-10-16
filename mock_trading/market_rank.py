@@ -16,7 +16,7 @@ from .domain import Currency
 # 같은 시장을 다시 받기까지의 최소 간격. 목록이 길어(시장당 30~40종목) 1분마다 받으면 요청 제한에 걸리기 쉽다.
 CACHE_TTL = timedelta(minutes=5)
 # 받기에 실패한 뒤 다시 시도하기까지, "새로 받기"를 다시 누를 수 있기까지의 최소 간격
-RETRY_INTERVAL = timedelta(minutes=1)
+RETRY_INTERVAL = timedelta(seconds=55)  # 자동 갱신(60초)보다 조금 짧게
 FORCE_MIN_INTERVAL = timedelta(seconds=30)
 TOP_N = 20
 
@@ -147,6 +147,14 @@ class MarketRanking:
             market, by, rank(snapshots, by), len(UNIVERSE[market]), len(snapshots), fetched_at,
             as_of=max(dates) if dates else None, last_failed=failed,
         )
+
+    def force_wait(self, market: Market, *, now: datetime | None = None) -> int:
+        """"새로 받기"를 다시 누를 수 있기까지 남은 초(0이면 지금 가능)."""
+        attempted = self._attempted_at.get(market)
+        if attempted is None:
+            return 0
+        left = FORCE_MIN_INTERVAL - ((now or datetime.now()) - attempted)
+        return max(0, int(left.total_seconds() + 0.999))
 
     def _fetch(self, items: list[tuple[str, str, Currency]]) -> list:
         get_snapshots = getattr(self.provider, "get_snapshots", None)

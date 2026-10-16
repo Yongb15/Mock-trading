@@ -15,8 +15,9 @@ _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
 def _safe_text(value: str) -> str:
-    """사람이 읽는 글자 칸(종목명·코드 등)만 보호한다. 숫자 칸은 숫자 그대로 둔다(음수 -는 숫자의 일부)."""
-    return "'" + value if value.startswith(_FORMULA_PREFIXES) else value
+    """사람이 읽는 글자 칸(종목명·코드 등)만 보호한다. 숫자 칸은 숫자 그대로 둔다(음수 -는 숫자의 일부).
+    일부 스프레드시트는 앞 공백을 무시하고 수식으로 읽으므로 공백을 뗀 첫 글자로 판단한다."""
+    return "'" + value if value.lstrip(" ").startswith(_FORMULA_PREFIXES) else value
 
 
 def trade_rows(trades: list[Trade]) -> list[list[str]]:
@@ -38,10 +39,12 @@ def trade_rows(trades: list[Trade]) -> list[list[str]]:
 
 
 def write_trades_csv(trades: list[Trade], path: Path | str) -> int:
-    """거래 내역을 CSV로 쓴다. 쓴 거래 수를 돌려준다."""
+    """거래 내역을 사용자가 고른 경로 그대로에 CSV로 쓴다. 쓴 거래 수를 돌려준다.
+
+    확장자를 여기서 바꾸면 저장 대화상자가 확인한 것과 다른 파일을 확인 없이 덮어쓸 수 있다 →
+    .csv 붙이기는 대화상자(setDefaultSuffix)가 하고, 덮어쓰기 확인도 대화상자가 한다.
+    """
     path = Path(path)
-    if path.suffix.lower() != ".csv":
-        path = path.with_suffix(".csv")
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(HEADER)
