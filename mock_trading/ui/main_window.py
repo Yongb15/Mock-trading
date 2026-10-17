@@ -177,9 +177,16 @@ class FitLabel(QLabel):
         return font
 
     def shown_text(self, font) -> str:
-        """이 글꼴로 칸에 들어가는 글자(넘치면 앞쪽을 …로 생략)."""
+        """이 글꼴로 칸에 들어가는 글자(넘치면 앞쪽을 …로 생략).
+
+        부호(+/-)는 생략하지 않고 남긴다 — 지우면 손실이 이익처럼 읽힌다(Mock_QA E1).
+        """
         metrics = QFontMetrics(font)
-        return metrics.elidedText(self.text(), Qt.ElideLeft, self.contentsRect().width())
+        text, width = self.text(), self.contentsRect().width()
+        if metrics.horizontalAdvance(text) <= width:
+            return text
+        sign = text[0] if text[:1] in ("+", "-") else ""
+        return sign + metrics.elidedText(text[len(sign):], Qt.ElideLeft, width - metrics.horizontalAdvance(sign))
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
         font = self.fitted_font()
