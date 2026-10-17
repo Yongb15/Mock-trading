@@ -200,3 +200,44 @@ def test_tooltip_does_not_render_html_from_names(window):
     doc = QTextDocument()
     doc.setHtml(table.item(0, 3).toolTip())
     assert doc.toPlainText() == name
+
+
+def test_window_fits_with_large_account_numbers(window, app):
+    """Mock_QA RM3: 요약 칸에 10자리 금액이 들어가도 창 최소 폭이 1,000px 이하.
+    요약이 '-'일 때나 테마(큰 글씨) 없이 재면 놓치므로 실제 테마를 입히고 가장 긴 값을 넣어 잰다."""
+    from mock_trading.ui.theme import apply_theme
+
+    font = app.font()
+    apply_theme(app)
+    try:
+        widest = {"total": "1,999,999,999원", "cash": "1,999,999,999원", "stock": "1,999,999,999원",
+                  "return": "-99.99%", "realized": "-1,999,999,999원"}
+        for key, text in widest.items():
+            window.summary_labels[key].setText(text)
+        window.tabs.setCurrentWidget(window.account_page)
+        app.processEvents()
+        assert window.minimumSizeHint().width() <= 1000
+    finally:
+        app.setStyleSheet("")
+        app.setFont(font)
+
+
+def test_summary_numbers_shrink_together_when_narrow(app):
+    """좁은 칸에서는 글자를 줄여 다 보이게 하고, 같은 줄 라벨은 같은 크기로 줄어든다."""
+    from PySide6.QtGui import QFont
+
+    from mock_trading.ui.main_window import FitLabel
+
+    font = QFont()
+    font.setPixelSize(22)
+    long, short = FitLabel("-1,999,999,999원", min_width=80), FitLabel("-1.00%", min_width=80)
+    for label in (long, short):
+        label.setFont(font)
+        label.peers = [long, short]
+        label.resize(400, 40)
+    assert long.fitted_font().pixelSize() == 22  # 넉넉하면 그대로
+    for label in (long, short):
+        label.resize(80, 40)
+    shrunk = long.fitted_font().pixelSize()
+    assert shrunk < 22 and short.fitted_font().pixelSize() == shrunk
+    assert long.minimumSizeHint().width() == 80  # 글자 길이가 최소 폭을 정하지 않는다

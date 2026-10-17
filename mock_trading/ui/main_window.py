@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, QStandardPaths, Qt, QTime, QTimer
+from PySide6.QtCore import QDateTime, QSize, QStandardPaths, Qt, QTime, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -121,6 +121,55 @@ def _item(text: str, *, align_right: bool = False, color: str = "") -> QTableWid
     return item
 
 
+class FitLabel(QLabel):
+    """큰 숫자 라벨: 칸이 좁으면 글자를 줄여 한 줄에 다 보이게 한다.
+
+    보통 QLabel은 글자 폭이 곧 최소 폭이라, 10자리 금액이 들어오면 창 전체의 최소 폭이 화면보다 커진다
+    (Mock_QA RM3). 이 라벨은 최소 폭을 고정값으로 두고, 그보다 좁아지면 글자 크기를 비율대로 줄인다.
+    같은 줄의 라벨끼리 peers로 묶으면 가장 많이 줄어야 하는 라벨에 맞춰 함께 줄어 크기가 들쭉날쭉하지 않다.
+    """
+
+    def __init__(self, text: str = "", *, min_width: int = 120) -> None:
+        super().__init__(text)
+        self._min_width = min_width
+        self.peers: list[FitLabel] = [self]
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt 이름 규칙)
+        return QSize(self._min_width, super().minimumSizeHint().height())
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt 이름 규칙)
+        super().setText(text)
+        for peer in self.peers:  # 한 칸이 길어지면 같은 줄의 다른 칸도 다시 맞춘다
+            peer.update()
+
+    def _ratio(self) -> float:
+        needed = self.fontMetrics().horizontalAdvance(self.text())
+        available = self.contentsRect().width()
+        return 1.0 if needed <= available or needed == 0 else available / needed
+
+    def fitted_font(self):
+        """지금 폭에 맞춘 글꼴(넉넉하면 원래 글꼴 그대로)."""
+        font = self.font()
+        ratio = min(peer._ratio() for peer in self.peers)
+        if ratio >= 1.0:
+            return font
+        if font.pixelSize() > 0:
+            font.setPixelSize(max(8, int(font.pixelSize() * ratio)))
+        else:
+            font.setPointSizeF(max(6.0, font.pointSizeF() * ratio))
+        return font
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
+        font = self.fitted_font()
+        if font == self.font():
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setFont(font)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(self.contentsRect(), int(self.alignment()), self.text())
+
+
 class MainWindow(QMainWindow):
     def __init__(self, broker: Broker, watchlist: Watchlist | None = None) -> None:
         super().__init__()
@@ -218,17 +267,27 @@ class MainWindow(QMainWindow):
     def _build_summary(self) -> QWidget:
         box = QGroupBox("내 계좌")
         grid = QGridLayout(box)
+        grid.setVerticalSpacing(6)
         self.summary_labels: dict[str, QLabel] = {}
-        for column, (key, title) in enumerate(
-            [("total", "총자산"), ("cash", "현금"), ("stock", "주식 평가"), ("return", "총 수익률"), ("realized", "실현 손익")]
-        ):
+        # 총자산은 첫 줄에 크게, 나머지 넷은 둘째 줄에. 다섯 개를 한 줄에 두면 9자리 금액에서 창 최소 폭이
+        # 1,300px를 넘어 작은 노트북 화면에 안 들어간다(Mock_QA RM3).
+        items = [("total", "총자산"), ("cash", "현금"), ("stock", "주식 평가"), ("return", "총 수익률"), ("realized", "실현 손익")]
+        for index, (key, title) in enumerate(items):
             caption = QLabel(title)
             caption.setObjectName("caption")
-            value = QLabel("-")
+            value = FitLabel("-", min_width=200 if key == "total" else 110)
             value.setObjectName("heroNumber" if key == "total" else "bigNumber")
-            grid.addWidget(caption, 0, column)
-            grid.addWidget(value, 1, column)
+            if key == "total":
+                grid.addWidget(caption, 0, 0, 1, 4)
+                grid.addWidget(value, 1, 0, 1, 4)
+            else:
+                grid.addWidget(caption, 2, index - 1)
+                grid.addWidget(value, 3, index - 1)
             self.summary_labels[key] = value
+        grid.setRowMinimumHeight(2, 28)  # 총자산 줄과 아래 줄 사이 여백
+        row = [self.summary_labels[key] for key in ("cash", "stock", "return", "realized")]
+        for label in row:
+            label.peers = row
 
         buttons = QVBoxLayout()
         refresh = QPushButton("새로고침")
@@ -239,7 +298,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(reset)
         holder = QWidget()
         holder.setLayout(buttons)
-        grid.addWidget(holder, 0, 5, 2, 1)
+        grid.addWidget(holder, 0, 4, 2, 1)
         return box
 
     def _build_quote_panel(self) -> QWidget:
