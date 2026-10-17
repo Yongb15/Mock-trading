@@ -240,4 +240,40 @@ def test_summary_numbers_shrink_together_when_narrow(app):
         label.resize(80, 40)
     shrunk = long.fitted_font().pixelSize()
     assert shrunk < 22 and short.fitted_font().pixelSize() == shrunk
+    assert shrunk >= FitLabel.MIN_PIXEL  # 읽을 수 있는 크기 아래로는 줄이지 않는다
     assert long.minimumSizeHint().width() == 80  # 글자 길이가 최소 폭을 정하지 않는다
+
+
+def test_summary_number_elides_front_instead_of_cutting_off(app):
+    """Mock_QA S1: 최소 글자 크기로도 넘치면 끝자리를 자르지 않고 앞쪽을 …로 생략, 전체는 툴팁으로."""
+    from PySide6.QtGui import QFont, QFontMetrics, QTextDocument
+
+    from mock_trading.ui.main_window import FitLabel
+
+    font = QFont()
+    font.setPixelSize(22)
+    label = FitLabel("-1,999,999,999원", min_width=40)
+    label.setFont(font)
+    label.resize(60, 40)
+    label.show()
+    app.processEvents()
+    fitted = label.fitted_font()
+    assert fitted.pixelSize() == FitLabel.MIN_PIXEL
+    shown = label.shown_text(fitted)
+    assert shown.startswith("…") and shown.endswith("원")
+    assert QFontMetrics(fitted).horizontalAdvance(shown) <= label.contentsRect().width()
+    doc = QTextDocument()
+    doc.setHtml(label.toolTip())
+    assert doc.toPlainText() == "-1,999,999,999원"
+    label.resize(400, 40)
+    app.processEvents()
+    assert label.toolTip() == ""
+    label.close()
+
+
+def test_table_headers_have_tooltips(window):
+    """좁은 창에서 머리글이 잘려도 마우스를 올리면 전체 이름이 보인다."""
+    for table in (window.holdings_table, window.trades_table, window.orders_table, window.rank_table):
+        for column in range(table.columnCount()):
+            item = table.horizontalHeaderItem(column)
+            assert item.toolTip() == item.text()

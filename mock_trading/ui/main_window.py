@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
 from PySide6.QtCore import QDateTime, QSize, QStandardPaths, Qt, QTime, QTimer
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -127,7 +127,12 @@ class FitLabel(QLabel):
     보통 QLabel은 글자 폭이 곧 최소 폭이라, 10자리 금액이 들어오면 창 전체의 최소 폭이 화면보다 커진다
     (Mock_QA RM3). 이 라벨은 최소 폭을 고정값으로 두고, 그보다 좁아지면 글자 크기를 비율대로 줄인다.
     같은 줄의 라벨끼리 peers로 묶으면 가장 많이 줄어야 하는 라벨에 맞춰 함께 줄어 크기가 들쭉날쭉하지 않다.
+    읽을 수 있는 크기(MIN_PIXEL) 아래로는 줄이지 않고, 그래도 넘치면 앞쪽(큰 자리)을 …로 생략하고
+    전체 값을 툴팁으로 보여 준다 — 금액 끝자리가 말없이 잘려 보이는 게 가장 나쁜 경우라서(Mock_QA S1·S2).
     """
+
+    MIN_PIXEL = 12
+    MIN_POINT = 9.0
 
     def __init__(self, text: str = "", *, min_width: int = 120) -> None:
         super().__init__(text)
@@ -140,7 +145,19 @@ class FitLabel(QLabel):
     def setText(self, text: str) -> None:  # noqa: N802 (Qt 이름 규칙)
         super().setText(text)
         for peer in self.peers:  # 한 칸이 길어지면 같은 줄의 다른 칸도 다시 맞춘다
+            peer._refresh_tooltip()
             peer.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
+        super().resizeEvent(event)
+        for peer in self.peers:
+            peer._refresh_tooltip()
+
+    def _refresh_tooltip(self) -> None:
+        """생략해서 보일 때만 전체 값을 툴팁으로(툴팁은 HTML로 해석될 수 있어 이스케이프)."""
+        font = self.fitted_font()
+        elided = font != self.font() and self.shown_text(font) != self.text()
+        self.setToolTip(f"<p style='white-space:pre'>{html.escape(self.text())}</p>" if elided else "")
 
     def _ratio(self) -> float:
         needed = self.fontMetrics().horizontalAdvance(self.text())
@@ -154,10 +171,15 @@ class FitLabel(QLabel):
         if ratio >= 1.0:
             return font
         if font.pixelSize() > 0:
-            font.setPixelSize(max(8, int(font.pixelSize() * ratio)))
+            font.setPixelSize(max(self.MIN_PIXEL, int(font.pixelSize() * ratio)))
         else:
-            font.setPointSizeF(max(6.0, font.pointSizeF() * ratio))
+            font.setPointSizeF(max(self.MIN_POINT, font.pointSizeF() * ratio))
         return font
+
+    def shown_text(self, font) -> str:
+        """이 글꼴로 칸에 들어가는 글자(넘치면 앞쪽을 …로 생략)."""
+        metrics = QFontMetrics(font)
+        return metrics.elidedText(self.text(), Qt.ElideLeft, self.contentsRect().width())
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
         font = self.fitted_font()
@@ -167,7 +189,7 @@ class FitLabel(QLabel):
         painter = QPainter(self)
         painter.setFont(font)
         painter.setPen(self.palette().color(self.foregroundRole()))
-        painter.drawText(self.contentsRect(), int(self.alignment()), self.text())
+        painter.drawText(self.contentsRect(), int(self.alignment()), self.shown_text(font))
 
 
 class MainWindow(QMainWindow):
@@ -459,7 +481,7 @@ class MainWindow(QMainWindow):
         order_page.addWidget(self._build_chart())
         order_page.setSizes([400, 800])
 
-        self.holdings_table = self._table(["종목", "코드", "수량", "평균 매입가", "현재가", "평가 금액", "평가 손익", "수익률"])
+        self.holdings_table = self._table(["종목", "코드", "수량", "평균 단가", "현재가", "평가 금액", "평가 손익", "수익률"])
         # 더블클릭과 Enter 모두로 연다
         self.holdings_table.itemActivated.connect(lambda item: self._open_holding(item.row(), item.column()))
         self.trades_table = self._table(["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료"], fit=(0, 2))
@@ -524,6 +546,8 @@ class MainWindow(QMainWindow):
         fit 열은 채운 뒤 _fit_columns로 FIT_COLUMN_MAX까지만 넓힌다(더 길면 말줄임 + 툴팁)."""
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
+        for column, header in enumerate(headers):  # 좁은 창에서 머리글이 잘려도 마우스를 올리면 보이게
+            table.horizontalHeaderItem(column).setToolTip(header)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.verticalHeader().hide()
