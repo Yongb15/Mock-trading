@@ -341,8 +341,73 @@ def test_choosing_from_the_popup_with_keyboard(window, app):
     popup = window.symbol_completer.popup()
     app.processEvents()
     assert popup.isVisible()
+    calls = []
+    original = window.load_quote
+    window.load_quote = lambda symbol=None: (calls.append(symbol), original(symbol))
     QTest.keyClick(popup, Qt.Key_Down)
     QTest.keyClick(popup, Qt.Key_Return)
     window.worker.wait(3000)
     app.processEvents()
     assert window.current and window.current.quote.symbol == "005930.KS"
+    assert len(calls) == 1  # Mock_QA NS1: Enter가 입력창에도 가서 두 번 조회하지 않는다
+
+
+def test_partial_name_enter_picks_single_match_or_asks(window, app):
+    """Mock_QA NS2: 이름 일부 + Enter — 후보가 하나면 그 종목, 여럿이면 조회하지 않고 고르라고 안내."""
+    window.current = None
+    window.symbol_input.setText("하이닉스")
+    window.load_quote()
+    window.worker.wait(3000)
+    app.processEvents()
+    assert window.current is None or window.current.quote.symbol == "000660.KS"
+    queued = []
+    window.worker.run = lambda *a, **k: queued.append(a)
+    window.symbol_input.setText("삼성")
+    window.load_quote()
+    assert queued == [] and "골라 주세요" in window.status.text()
+    window.symbol_input.setText("하이닉스")
+    window.load_quote()
+    assert len(queued) == 1  # 하나뿐이면 바로 조회
+
+
+def test_enter_without_choosing_still_looks_up_once(window, app):
+    """목록이 떠 있어도 고르지 않고 Enter → 입력한 그대로 한 번 조회(조회가 사라지거나 두 번 되지 않음)."""
+    from PySide6.QtTest import QTest
+
+    window.show()
+    window.tabs.setCurrentWidget(window.order_page)
+    window.symbol_input.setFocus()
+    window.symbol_input.setText("005930")
+    window._suggest_symbols("005930")
+    popup = window.symbol_completer.popup()
+    app.processEvents()
+    assert popup.isVisible()
+    calls = []
+    original = window.load_quote
+    window.load_quote = lambda symbol=None: (calls.append(symbol), original(symbol))
+    QTest.keyClick(popup, Qt.Key_Return)
+    window.worker.wait(3000)
+    app.processEvents()
+    assert len(calls) == 1
+    assert window.current and window.current.quote.symbol == "005930.KS"
+
+
+def test_enter_keeps_typed_code_when_nothing_chosen(window, app):
+    """목록 첫 항목을 미리 고르지 않는다: "AAP"(실제 있는 티커) + Enter가 AAPL로 바뀌지 않는다."""
+    from PySide6.QtTest import QTest
+
+    window.show()
+    window.tabs.setCurrentWidget(window.order_page)
+    window.symbol_input.setFocus()
+    window.symbol_input.setText("AAP")
+    window._suggest_symbols("AAP")
+    popup = window.symbol_completer.popup()
+    app.processEvents()
+    assert popup.isVisible() and not popup.currentIndex().isValid()
+    calls = []
+    original = window.load_quote
+    window.load_quote = lambda symbol=None: (calls.append(symbol), original(symbol))
+    QTest.keyClick(popup, Qt.Key_Return)
+    window.worker.wait(3000)
+    app.processEvents()
+    assert calls == [None] and window.symbol_input.text() == "AAP" and not popup.isVisible()
