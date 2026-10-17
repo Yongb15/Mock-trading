@@ -411,3 +411,18 @@ def test_enter_keeps_typed_code_when_nothing_chosen(window, app):
     window.worker.wait(3000)
     app.processEvents()
     assert calls == [None] and window.symbol_input.text() == "AAP" and not popup.isVisible()
+
+
+def test_lookup_button_behaves_like_enter(window, app):
+    """Mock_QA NS6: "조회" 버튼도 Enter와 같다 — 여러 후보인 이름 일부는 조회하지 않고 고르라고 안내."""
+    from PySide6.QtWidgets import QPushButton
+
+    lookup = next(b for b in window.findChildren(QPushButton) if b.text() == "조회")
+    queued = []
+    window.worker.run = lambda *a, **k: queued.append(a)
+    window.symbol_input.setText("삼성")
+    lookup.click()
+    assert queued == [] and "골라 주세요" in window.status.text()
+    window.symbol_input.setText("005930")
+    lookup.click()
+    assert len(queued) == 1

@@ -374,7 +374,7 @@ class MainWindow(QMainWindow):
         self._ime_filter = _ImeSearchFilter(self._suggest_symbols, self)
         self.symbol_input.installEventFilter(self._ime_filter)
         lookup = QPushButton("조회")
-        lookup.clicked.connect(self.load_quote)
+        lookup.clicked.connect(self._enter_pressed)  # clicked(checked)가 load_quote의 symbol로 들어가지 않게(Mock_QA NS6)
         search.addWidget(self.symbol_input, 1)
         search.addWidget(lookup)
         layout.addLayout(search)
