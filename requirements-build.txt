@@ -1,3 +1,4 @@
-# 실행 파일 빌드 도구(버전 고정 — 리뷰한 빌드와 같은 결과가 나오게). 앱 실행에는 필요 없다.
+# 실행 파일 빌드·README 화면 만들기 도구(버전 고정 — 리뷰한 빌드와 같은 결과가 나오게). 앱 실행에는 필요 없다.
 pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.8
+pillow==12.3.0  # packaging/make_media.py(시연 GIF)

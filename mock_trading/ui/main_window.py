@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, QStandardPaths, Qt, QTime, QTimer
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtCore import QDateTime, QSize, QStandardPaths, Qt, QTime, QTimer
+from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -59,6 +59,7 @@ from .worker import Worker
 AUTO_REFRESH_MS = 60_000
 CLOSE_WAIT_MS = 3_000
 DEFAULT_INITIAL_CASH = 10_000_000
+FIT_COLUMN_MAX = 280  # 내용에 맞추는 열의 최대 폭(긴 종목명이 다른 열을 밀어내지 않게)
 
 
 @dataclass
@@ -118,6 +119,84 @@ def _item(text: str, *, align_right: bool = False, color: str = "") -> QTableWid
     if color:
         item.setForeground(QColor(color))
     return item
+
+
+class FitLabel(QLabel):
+    """큰 숫자 라벨: 칸이 좁으면 글자를 줄여 한 줄에 다 보이게 한다.
+
+    보통 QLabel은 글자 폭이 곧 최소 폭이라, 10자리 금액이 들어오면 창 전체의 최소 폭이 화면보다 커진다
+    (Mock_QA RM3). 이 라벨은 최소 폭을 고정값으로 두고, 그보다 좁아지면 글자 크기를 비율대로 줄인다.
+    같은 줄의 라벨끼리 peers로 묶으면 가장 많이 줄어야 하는 라벨에 맞춰 함께 줄어 크기가 들쭉날쭉하지 않다.
+    읽을 수 있는 크기(MIN_PIXEL) 아래로는 줄이지 않고, 그래도 넘치면 앞쪽(큰 자리)을 …로 생략하고
+    전체 값을 툴팁으로 보여 준다 — 금액 끝자리가 말없이 잘려 보이는 게 가장 나쁜 경우라서(Mock_QA S1·S2).
+    """
+
+    MIN_PIXEL = 12
+    MIN_POINT = 9.0
+
+    def __init__(self, text: str = "", *, min_width: int = 120) -> None:
+        super().__init__(text)
+        self._min_width = min_width
+        self.peers: list[FitLabel] = [self]
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt 이름 규칙)
+        return QSize(self._min_width, super().minimumSizeHint().height())
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt 이름 규칙)
+        super().setText(text)
+        for peer in self.peers:  # 한 칸이 길어지면 같은 줄의 다른 칸도 다시 맞춘다
+            peer._refresh_tooltip()
+            peer.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
+        super().resizeEvent(event)
+        for peer in self.peers:
+            peer._refresh_tooltip()
+
+    def _refresh_tooltip(self) -> None:
+        """생략해서 보일 때만 전체 값을 툴팁으로(툴팁은 HTML로 해석될 수 있어 이스케이프)."""
+        font = self.fitted_font()
+        elided = font != self.font() and self.shown_text(font) != self.text()
+        self.setToolTip(f"<p style='white-space:pre'>{html.escape(self.text())}</p>" if elided else "")
+
+    def _ratio(self) -> float:
+        needed = self.fontMetrics().horizontalAdvance(self.text())
+        available = self.contentsRect().width()
+        return 1.0 if needed <= available or needed == 0 else available / needed
+
+    def fitted_font(self):
+        """지금 폭에 맞춘 글꼴(넉넉하면 원래 글꼴 그대로)."""
+        font = self.font()
+        ratio = min(peer._ratio() for peer in self.peers)
+        if ratio >= 1.0:
+            return font
+        if font.pixelSize() > 0:
+            font.setPixelSize(max(self.MIN_PIXEL, int(font.pixelSize() * ratio)))
+        else:
+            font.setPointSizeF(max(self.MIN_POINT, font.pointSizeF() * ratio))
+        return font
+
+    def shown_text(self, font) -> str:
+        """이 글꼴로 칸에 들어가는 글자(넘치면 앞쪽을 …로 생략).
+
+        부호(+/-)는 생략하지 않고 남긴다 — 지우면 손실이 이익처럼 읽힌다(Mock_QA E1).
+        """
+        metrics = QFontMetrics(font)
+        text, width = self.text(), self.contentsRect().width()
+        if metrics.horizontalAdvance(text) <= width:
+            return text
+        sign = text[0] if text[:1] in ("+", "-") else ""
+        return sign + metrics.elidedText(text[len(sign):], Qt.ElideLeft, width - metrics.horizontalAdvance(sign))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
+        font = self.fitted_font()
+        if font == self.font():
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setFont(font)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(self.contentsRect(), int(self.alignment()), self.shown_text(font))
 
 
 class MainWindow(QMainWindow):
@@ -217,17 +296,27 @@ class MainWindow(QMainWindow):
     def _build_summary(self) -> QWidget:
         box = QGroupBox("내 계좌")
         grid = QGridLayout(box)
+        grid.setVerticalSpacing(6)
         self.summary_labels: dict[str, QLabel] = {}
-        for column, (key, title) in enumerate(
-            [("total", "총자산"), ("cash", "현금"), ("stock", "주식 평가"), ("return", "총 수익률"), ("realized", "실현 손익")]
-        ):
+        # 총자산은 첫 줄에 크게, 나머지 넷은 둘째 줄에. 다섯 개를 한 줄에 두면 9자리 금액에서 창 최소 폭이
+        # 1,300px를 넘어 작은 노트북 화면에 안 들어간다(Mock_QA RM3).
+        items = [("total", "총자산"), ("cash", "현금"), ("stock", "주식 평가"), ("return", "총 수익률"), ("realized", "실현 손익")]
+        for index, (key, title) in enumerate(items):
             caption = QLabel(title)
             caption.setObjectName("caption")
-            value = QLabel("-")
+            value = FitLabel("-", min_width=200 if key == "total" else 110)
             value.setObjectName("heroNumber" if key == "total" else "bigNumber")
-            grid.addWidget(caption, 0, column)
-            grid.addWidget(value, 1, column)
+            if key == "total":
+                grid.addWidget(caption, 0, 0, 1, 4)
+                grid.addWidget(value, 1, 0, 1, 4)
+            else:
+                grid.addWidget(caption, 2, index - 1)
+                grid.addWidget(value, 3, index - 1)
             self.summary_labels[key] = value
+        grid.setRowMinimumHeight(2, 28)  # 총자산 줄과 아래 줄 사이 여백
+        row = [self.summary_labels[key] for key in ("cash", "stock", "return", "realized")]
+        for label in row:
+            label.peers = row
 
         buttons = QVBoxLayout()
         refresh = QPushButton("새로고침")
@@ -238,7 +327,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(reset)
         holder = QWidget()
         holder.setLayout(buttons)
-        grid.addWidget(holder, 0, 5, 2, 1)
+        grid.addWidget(holder, 0, 4, 2, 1)
         return box
 
     def _build_quote_panel(self) -> QWidget:
@@ -399,10 +488,10 @@ class MainWindow(QMainWindow):
         order_page.addWidget(self._build_chart())
         order_page.setSizes([400, 800])
 
-        self.holdings_table = self._table(["종목", "코드", "수량", "평균 매입가", "현재가", "평가 금액", "평가 손익", "수익률"])
+        self.holdings_table = self._table(["종목", "코드", "수량", "평균 단가", "현재가", "평가 금액", "평가 손익", "수익률"])
         # 더블클릭과 Enter 모두로 연다
         self.holdings_table.itemActivated.connect(lambda item: self._open_holding(item.row(), item.column()))
-        self.trades_table = self._table(["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료"])
+        self.trades_table = self._table(["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료"], fit=(0, 2))
         self.watch_table = self._table(["종목", "코드", "현재가", "전일 대비"])
         self.watch_table.itemActivated.connect(lambda item: self._open_watch(item.row(), item.column()))
         QShortcut(QKeySequence.Delete, self.watch_table, self._remove_selected_watch, context=Qt.WidgetShortcut)
@@ -445,7 +534,7 @@ class MainWindow(QMainWindow):
         orders_tab = self.orders_tab = QWidget()
         orders_layout = QVBoxLayout(orders_tab)
         orders_layout.setContentsMargins(0, 0, 0, 0)
-        self.orders_table = self._table(["번호", "주문 시각", "구분", "종목", "수량", "지정가", "상태", "비고"])
+        self.orders_table = self._table(["번호", "주문 시각", "구분", "종목", "수량", "지정가", "상태", "비고"], fit=(1, 3))
         QShortcut(QKeySequence.Delete, self.orders_table, self._cancel_selected_orders, context=Qt.WidgetShortcut)
         orders_layout.addWidget(self.orders_table, 1)
         cancel = QPushButton("선택한 대기 주문 취소 (Delete)")
@@ -459,16 +548,34 @@ class MainWindow(QMainWindow):
         return tabs
 
     @staticmethod
-    def _table(headers: list[str]) -> QTableWidget:
+    def _table(headers: list[str], *, fit: tuple[int, ...] = ()) -> QTableWidget:
+        """fit: 내용 길이에 맞출 열(시각·종목명처럼 잘리면 안 되는 열). 나머지 열은 남은 폭을 나눠 쓴다.
+        fit 열은 채운 뒤 _fit_columns로 FIT_COLUMN_MAX까지만 넓힌다(더 길면 말줄임 + 툴팁)."""
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
+        for column, header in enumerate(headers):  # 좁은 창에서 머리글이 잘려도 마우스를 올리면 보이게
+            table.horizontalHeaderItem(column).setToolTip(header)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.verticalHeader().hide()
         table.verticalHeader().setDefaultSectionSize(44)
         table.setShowGrid(False)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        for column in fit:
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Interactive)
+        table.fit_columns = fit
         return table
+
+    @staticmethod
+    def _fit_columns(table: QTableWidget) -> None:
+        for column in table.fit_columns:
+            table.resizeColumnToContents(column)
+            table.setColumnWidth(column, min(table.columnWidth(column), FIT_COLUMN_MAX))
+            for row in range(table.rowCount()):
+                item = table.item(row, column)
+                if item is not None:
+                    # 툴팁은 HTML처럼 보이면 서식으로 그리므로, 이스케이프한 뒤 태그로 감싸 글자 그대로 보이게 한다
+                    item.setToolTip("<p style='white-space:pre'>" + html.escape(item.text()) + "</p>")
 
     # ------------------------------------------------------------------ 시작 / 계좌
     def start(self) -> bool:
@@ -982,6 +1089,7 @@ class MainWindow(QMainWindow):
             ]
             for column, cell in enumerate(values):
                 self.orders_table.setItem(row, column, cell)
+        self._fit_columns(self.orders_table)
 
     @staticmethod
     def _status_item(text: str, color: str, status: OrderStatus) -> QTableWidgetItem:
@@ -1245,6 +1353,7 @@ class MainWindow(QMainWindow):
             ]
             for column, item in enumerate(values):
                 self.trades_table.setItem(row, column, item)
+        self._fit_columns(self.trades_table)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
         self.timer.stop()
