@@ -76,6 +76,7 @@ class _QuoteView:
     fx_rate: Decimal
     watched: bool = False
     pending_sell: int = 0
+    period: str | None = None  # history가 어느 차트 기간 것인지. None이면 이번 조회는 이력을 받지 않았다
 
 
 @dataclass
@@ -248,6 +249,8 @@ class MainWindow(QMainWindow):
         self._rank_reload = False
         self._rank_market = Market.KR
         self._chart_period = DEFAULT_CHART_RANGE
+        self._chart_loading = False  # 기간 버튼으로 차트를 받는 중
+        self._chart_reload = False   # 받는 중에 기간이 또 바뀜 → 끝나면 한 번 더
         self._rank_by = RankBy.GAINERS
         self._orders_checking = False
         self._unseen_order_events = 0
@@ -479,25 +482,62 @@ class MainWindow(QMainWindow):
         layout.addWidget(view, 1)
         return holder
 
-    def _chart_label(self) -> str:
-        return dict(CHART_RANGES)[self._chart_period]
+    def _chart_label(self, period: str | None = None) -> str:
+        return dict(CHART_RANGES).get(period or self._chart_period, "")
+
+    def _check_chart_range(self, period: str) -> None:
+        for button in self.chart_range_group.buttons():
+            button.setChecked(button.property("value") == period)
 
     def _on_chart_range(self, button: QPushButton) -> None:
-        """기간만 바꾸면 차트만 다시 받는다(시세·주문 정보는 그대로). 느린 조회라 읽기 전용 풀에서."""
-        self._chart_period = button.property("value")
+        period = button.property("value")
+        if period == self._chart_period:
+            return  # 이미 그 기간(Mock_Sequrity CR2)
+        self._chart_period = period
+        self._load_chart()
+
+    def _load_chart(self) -> None:
+        """지금 고른 기간의 차트만 다시 받는다(시세·주문 정보는 그대로). 느린 조회라 읽기 전용 풀에서.
+
+        받는 중에 기간을 또 바꾸면 끝난 뒤 마지막 기간만 한 번 더 받는다(연타해도 요청이 쌓이지 않게).
+        """
         if not self.current:
+            return  # 다음 조회부터 이 기간으로 받는다
+        if self._chart_loading:
+            self._chart_reload = True
             return
+        self._chart_loading, self._chart_reload = True, False
         quote, period = self.current.quote, self._chart_period
-        self.status.setText(f"{quote.symbol} {self._chart_label()} 차트를 불러오는 중...")
+        self.status.setText(f"{quote.symbol} {self._chart_label(period)} 차트를 불러오는 중...")
+
+        def finish() -> None:
+            self._chart_loading = False
+            current = self.current
+            if self._chart_reload or (current and current.period != self._chart_period):
+                self._chart_reload = False
+                self._load_chart()
 
         def done(history: list[PricePoint]) -> None:
-            # 그사이 다른 종목을 열었거나 기간을 또 바꿨으면 늦게 온 결과는 버린다
+            # 그사이 다른 종목을 열었거나 기간을 또 바꿨으면 이 결과는 버린다
             if self.current and self.current.quote.symbol == quote.symbol and self._chart_period == period:
-                self.current.history = history
-                self._draw_chart(self.current.quote, history)
-                self.status.setText(f"{quote.symbol} {self._chart_label()} 차트")
+                self.current.history, self.current.period = history, period
+                self._draw_chart(self.current.quote, history, period)
+                self.status.setText(f"{quote.symbol} {self._chart_label(period)} 차트")
+            finish()
 
-        self.reader.run(lambda: self.broker.provider.get_history(quote.symbol, period), done, self._show_error)
+        def failed(message: str) -> None:
+            # 버튼은 화면에 실제로 그려진 기간으로 되돌린다(Mock_QA CR5)
+            shown = self.current.period if self.current and self.current.period else DEFAULT_CHART_RANGE
+            if self._chart_period == period:
+                self._chart_period = shown
+                self._check_chart_range(shown)
+            self._show_error(f"{self._chart_label(period)} 차트를 받지 못했어요: {message}")
+            if not self._chart_reload:
+                self._chart_loading = False
+                return
+            finish()
+
+        self.reader.run(lambda: self.broker.provider.get_history(quote.symbol, period), done, failed)
 
     def _build_rank_page(self) -> QWidget:
         page = self.rank_page = QWidget()
@@ -727,7 +767,9 @@ class MainWindow(QMainWindow):
         self.check_limit_orders()  # 체결이 계좌 갱신에 바로 반영되도록 맨 앞에
         self.load_portfolio()
         if self.current:
-            self.load_quote(self.current.quote.symbol)
+            # 과거 종가는 바뀌지 않으므로 자동 갱신은 시세만(이력은 종목을 열거나 기간을 바꿀 때만 받는다).
+            # 주문 대기열에서 긴 기간 이력을 60초마다 받느라 주문이 기다리지 않게(Mock_Sequrity CR1, Mock_QA CR2)
+            self.load_quote(self.current.quote.symbol, with_history=False)
         self.load_orders()
         # 관심 종목·자산 추이는 가장 덜 급하므로 맨 뒤에, 탭이 보일 때만.
         self._load_visible_tab()
@@ -786,7 +828,7 @@ class MainWindow(QMainWindow):
         self.symbol_input.setText(symbol)
         self.load_quote(symbol)
 
-    def load_quote(self, symbol: str | None = None) -> None:
+    def load_quote(self, symbol: str | None = None, *, with_history: bool = True) -> None:
         typed = symbol is None
         symbol = symbols.resolve(symbol or self.symbol_input.text())  # 이름이면 코드로
         if not symbol.strip():
@@ -801,11 +843,11 @@ class MainWindow(QMainWindow):
                 self._suggest_symbols(symbol)
                 return
         self.status.setText(f"{symbol} 시세를 불러오는 중...")
-        period = self._chart_period
+        period = self._chart_period if with_history else None
 
         def job() -> _QuoteView:
             quote = self.broker.provider.get_quote(symbol)
-            history = self.broker.provider.get_history(quote.symbol, period)
+            history = self.broker.provider.get_history(quote.symbol, period) if period else []
             fx_rate = self.broker.fx_rate_for(quote.currency)
             held = self.broker.repo.holdings().get(quote.symbol)
             return _QuoteView(
@@ -816,6 +858,7 @@ class MainWindow(QMainWindow):
                 fx_rate,
                 self.watchlist.contains(quote.symbol),
                 self.broker.pending_sell_quantity(quote.symbol),
+                period,
             )
 
         self.worker.run(job, self._show_quote, self._show_error)
@@ -1375,6 +1418,14 @@ class MainWindow(QMainWindow):
         self._set_order_enabled(True)
 
     def _show_quote(self, view: _QuoteView) -> None:
+        previous = self.current
+        if view.period != self._chart_period:
+            # 이력을 받지 않은 자동 갱신이거나, 조회가 대기열에 있는 사이 기간을 바꿔서 이전 기간 이력이 왔다.
+            # 같은 종목이면 화면에 있는 이력(그 기간 그대로)을 유지하고, 아니면 지금 기간으로 다시 받는다(Mock_QA CR1).
+            if previous and previous.quote.symbol == view.quote.symbol:
+                view.history, view.period = previous.history, previous.period
+            else:
+                view.history, view.period = [], None
         self.current = view
         quote = view.quote
         self.name_label.setText(f"{quote.name}  ({quote.symbol})")
@@ -1393,10 +1444,13 @@ class MainWindow(QMainWindow):
         self._update_estimate()
         self._set_order_enabled(True)
         self._show_watch_state()
-        self._draw_chart(quote, view.history)
+        self._draw_chart(quote, view.history, view.period)
         self.status.setText(f"{quote.symbol} 시세 갱신 완료 (무료 시세는 최대 약 15분 지연될 수 있습니다)")
+        if view.period != self._chart_period:
+            self._load_chart()
 
-    def _draw_chart(self, quote: Quote, history: list[PricePoint]) -> None:
+    def _draw_chart(self, quote: Quote, history: list[PricePoint], period: str | None) -> None:
+        """period: 이 이력의 기간. 제목·가로축을 그 기간으로 그린다(지금 고른 기간이 아니라)."""
         self.chart.removeAllSeries()
         for axis in self.chart.axes():
             self.chart.removeAxis(axis)
@@ -1410,7 +1464,7 @@ class MainWindow(QMainWindow):
         self.chart.addSeries(series)
 
         x_axis = QDateTimeAxis()
-        x_axis.setFormat("yy/MM" if self._chart_period in ("1y", "5y") else "MM/dd")
+        x_axis.setFormat("yy/MM" if period in ("1y", "5y") else "MM/dd")
         y_axis = QValueAxis()
         y_axis.setLabelFormat("%.0f" if quote.currency.value == "KRW" else "%.2f")
         closes = [float(p.close) for p in history]
@@ -1421,7 +1475,7 @@ class MainWindow(QMainWindow):
         series.attachAxis(x_axis)
         series.attachAxis(y_axis)
         style_axes(self.chart)
-        self.chart.setTitle(html.escape(f"{quote.name} 최근 {self._chart_label()} 종가"))  # QChart 제목은 HTML을 해석한다
+        self.chart.setTitle(html.escape(f"{quote.name} 최근 {self._chart_label(period)} 종가"))  # QChart 제목은 HTML을 해석한다
 
     def _show_portfolio(self, view: _PortfolioView) -> None:
         summary = view.summary
