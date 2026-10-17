@@ -38,3 +38,11 @@ def test_resolve_name_label_or_code():
     assert resolve("삼성전자  005930.KS") == "005930.KS"  # 목록에서 고른 글자
     assert resolve(" 005930 ") == "005930"  # 코드는 그대로(시세 조회가 검증)
     assert resolve("삼성") == "삼성"  # 정확하지 않은 이름은 바꾸지 않음
+
+
+def test_edited_label_is_not_resolved_to_its_code():
+    """Mock_Sequrity NS1: 라벨의 이름 부분을 고치면 끝의 코드로 바꾸지 않는다(그대로 코드 검증으로 넘어가 실패)."""
+    assert resolve("애플  005930.KS") == "애플  005930.KS"
+    assert resolve("아무거나  V") == "아무거나  V"
+    for match in search("삼성", limit=20):
+        assert resolve(match.label) == match.symbol

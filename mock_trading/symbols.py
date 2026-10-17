@@ -97,7 +97,8 @@ def resolve(text: str) -> str:
     """조회창에 친 글자를 조회할 코드로. 이름과 정확히 같거나 목록에서 고른 "이름  코드"면 그 코드,
     아니면 입력 그대로(코드로 보고 시세 조회에서 검증한다)."""
     stripped = text.strip()
-    for symbol, _name, names in _ENTRIES:
-        if stripped.endswith(f"  {symbol}") or any(_key(n) == _key(stripped) for n in names):
+    for symbol, name, names in _ENTRIES:
+        # 목록 라벨은 글자 그대로 같을 때만(이름을 고친 "애플  005930.KS"가 삼성전자로 바뀌지 않게, Mock_Sequrity NS1)
+        if stripped == Match(symbol, name).label or any(_key(n) == _key(stripped) for n in names):
             return symbol
     return stripped
