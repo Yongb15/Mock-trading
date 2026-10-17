@@ -4,7 +4,8 @@
 """
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QFont, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication
 
 BACKGROUND = "#F2F4F6"
@@ -194,3 +195,58 @@ def style_axes(chart) -> None:
         axis.setGridLineColor(QColor(LINE))
         axis.setLinePen(QPen(QColor(LINE)))
         axis.setTitleBrush(QColor(TEXT_SUB))
+
+
+ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+
+
+def draw_icon(size: int) -> QPixmap:
+    """앱 아이콘: 파란 둥근 사각형 위에 올라가는 막대 셋과 추세선. 창·작업 표시줄·exe 아이콘이 모두 이 그림을 쓴다.
+
+    작은 크기(16~24px)에서는 선이 뭉개지므로 막대만 그린다.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    s = float(size)
+    gradient = QLinearGradient(0, 0, 0, s)
+    gradient.setColorAt(0, QColor("#3B7BF0"))
+    gradient.setColorAt(1, QColor(ACCENT))
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(gradient)
+    painter.drawRoundedRect(QRectF(0, 0, s, s), s * 0.22, s * 0.22)
+
+    small = size <= 24
+    base = s * 0.80
+    width = s * (0.16 if small else 0.13)
+    lefts = (0.20, 0.42, 0.64) if small else (0.22, 0.435, 0.65)
+    heights = (0.24, 0.38, 0.54) if small else (0.20, 0.30, 0.42)
+    painter.setBrush(QColor(255, 255, 255, 255 if small else 150))
+    for left, height in zip(lefts, heights):
+        painter.drawRoundedRect(QRectF(s * left, base - s * height, width, s * height), width * 0.25, width * 0.25)
+
+    if not small:
+        points = [QPointF(s * 0.20, s * 0.50), QPointF(s * 0.42, s * 0.40),
+                  QPointF(s * 0.58, s * 0.46), QPointF(s * 0.80, s * 0.22)]
+        path = QPainterPath(points[0])
+        for point in points[1:]:
+            path.lineTo(point)
+        painter.setBrush(Qt.NoBrush)
+        pen = QPen(QColor("white"), s * 0.065)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.drawPath(path)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("white"))
+        painter.drawEllipse(points[-1], s * 0.075, s * 0.075)
+    painter.end()
+    return pixmap
+
+
+def app_icon() -> QIcon:
+    icon = QIcon()
+    for size in ICON_SIZES:
+        icon.addPixmap(draw_icon(size))
+    return icon
