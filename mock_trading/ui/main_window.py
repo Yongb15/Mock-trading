@@ -51,7 +51,8 @@ from ..domain import (
 from ..history import AssetPoint, DailyCloseCache, load_asset_history
 from ..market_data import PricePoint, is_valid_symbol
 from ..export import write_trades_csv
-from .. import symbols
+from .. import allocation, symbols
+from .allocation_bar import AllocationPanel
 from ..market_rank import Market, MarketRanking, RankBy, Ranking
 from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
@@ -526,7 +527,8 @@ class MainWindow(QMainWindow):
             finish()
 
         def failed(message: str) -> None:
-            # 버튼은 화면에 실제로 그려진 기간으로 되돌린다(Mock_QA CR5)
+            # 버튼은 화면에 실제로 그려진 기간으로 되돌린다(Mock_QA CR5). 여기서 바로 다시 시도하지는 않는다.
+            # 화면에 이 종목 이력이 아예 없으면 다음 자동 갱신(60초) 때 _show_quote가 한 번 더 받는다.
             shown = self.current.period if self.current and self.current.period else DEFAULT_CHART_RANGE
             if self._chart_period == period:
                 self._chart_period = shown
@@ -595,6 +597,11 @@ class MainWindow(QMainWindow):
         account_layout.setContentsMargins(0, 0, 0, 0)
         account_layout.setSpacing(12)
         account_layout.addWidget(self._build_summary())
+        allocation_box = QGroupBox("자산 구성")
+        allocation_layout = QVBoxLayout(allocation_box)
+        self.allocation_panel = AllocationPanel()
+        allocation_layout.addWidget(self.allocation_panel)
+        account_layout.addWidget(allocation_box)
         holdings_box = QGroupBox("보유 종목")
         holdings_layout = QVBoxLayout(holdings_box)
         holdings_layout.setContentsMargins(8, 8, 8, 8)
@@ -1455,6 +1462,7 @@ class MainWindow(QMainWindow):
         for axis in self.chart.axes():
             self.chart.removeAxis(axis)
         if not history:
+            self.chart.setTitle("")  # 이전 종목 제목이 빈 차트 위에 남지 않게
             return
         series = QLineSeries()
         first, last = history[0].close, history[-1].close
@@ -1486,6 +1494,7 @@ class MainWindow(QMainWindow):
         self.summary_labels["return"].setText(fmt.percent(rate))
         self.summary_labels["return"].setStyleSheet(f"color: {fmt.color_for(rate)};")
         self.summary_labels["realized"].setText(fmt.signed_won(summary.realized_profit))
+        self.allocation_panel.set_slices(allocation.slices(view.positions, summary.cash))
 
         self.holdings_table.setRowCount(len(view.positions))
         for row, position in enumerate(sorted(view.positions, key=lambda p: p.value_krw, reverse=True)):
