@@ -317,3 +317,32 @@ def test_search_by_name_loads_the_quote(window, app):
     window.worker.wait(3000)
     app.processEvents()
     assert window.current and window.current.quote.symbol == "005930.KS"
+
+
+def test_korean_composition_is_searched_while_typing(window, app):
+    """조합 중인 한글(아직 text()에 없음)도 붙여서 찾는다: "삼"이 입력된 상태에서 "성"을 조합 중."""
+    from PySide6.QtGui import QInputMethodEvent
+
+    window.symbol_input.setText("삼")
+    window.symbol_input.setCursorPosition(1)
+    app.sendEvent(window.symbol_input, QInputMethodEvent("성", []))
+    assert window.symbol_matches.stringList()[0].startswith("삼성")
+
+
+def test_choosing_from_the_popup_with_keyboard(window, app):
+    """목록에서 방향키 + Enter로 고르면 그 종목을 조회한다(마우스 없이)."""
+    from PySide6.QtTest import QTest
+
+    window.show()
+    window.tabs.setCurrentWidget(window.order_page)
+    window.symbol_input.setFocus()
+    window.symbol_input.setText("삼성전")
+    window._suggest_symbols("삼성전")
+    popup = window.symbol_completer.popup()
+    app.processEvents()
+    assert popup.isVisible()
+    QTest.keyClick(popup, Qt.Key_Down)
+    QTest.keyClick(popup, Qt.Key_Return)
+    window.worker.wait(3000)
+    app.processEvents()
+    assert window.current and window.current.quote.symbol == "005930.KS"

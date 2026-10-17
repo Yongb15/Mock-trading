@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, QSize, QStandardPaths, QStringListModel, Qt, QTime, QTimer
+from PySide6.QtCore import QDateTime, QEvent, QObject, QSize, QStandardPaths, QStringListModel, Qt, QTime, QTimer
 from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -201,6 +201,26 @@ class FitLabel(QLabel):
         painter.drawText(self.contentsRect(), int(self.alignment()), self.shown_text(font))
 
 
+class _ImeSearchFilter(QObject):
+    """한글은 조합 중인 글자가 text()에 아직 없어 "삼성"을 치는 동안 "삼"으로만 찾게 된다.
+    입력기 이벤트에서 조합 중인 글자까지 붙여 바로 찾는다."""
+
+    def __init__(self, suggest, parent=None) -> None:
+        super().__init__(parent)
+        self._suggest = suggest
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt 이름 규칙)
+        if event.type() == QEvent.InputMethod:
+            text, cursor = watched.text(), watched.cursorPosition()
+            if watched.hasSelectedText():  # 선택한 글자는 새로 친 글자로 바뀐다
+                start = watched.selectionStart()
+                text, cursor = text[:start] + text[start + len(watched.selectedText()):], start
+            typing = event.commitString() + event.preeditString()
+            if typing:
+                self._suggest(text[:cursor] + typing + text[cursor:])
+        return False  # 입력 처리는 그대로
+
+
 class MainWindow(QMainWindow):
     def __init__(self, broker: Broker, watchlist: Watchlist | None = None) -> None:
         super().__init__()
@@ -248,7 +268,7 @@ class MainWindow(QMainWindow):
         content = QVBoxLayout()
         content.setSpacing(8)
         content.addWidget(self._build_pages(), 1)
-        self.status = _plain_label("종목 코드를 입력하세요. 예) 005930(삼성전자), AAPL")
+        self.status = _plain_label("종목 이름이나 코드를 입력하세요. 예) 삼성전자, 005930, 애플, AAPL")
         self.status.setObjectName("status")
         content.addWidget(self.status)
 
@@ -351,6 +371,8 @@ class MainWindow(QMainWindow):
         self.symbol_completer.setWidget(self.symbol_input)
         self.symbol_completer.activated.connect(self._pick_symbol)
         self.symbol_input.textEdited.connect(self._suggest_symbols)
+        self._ime_filter = _ImeSearchFilter(self._suggest_symbols, self)
+        self.symbol_input.installEventFilter(self._ime_filter)
         lookup = QPushButton("조회")
         lookup.clicked.connect(self.load_quote)
         search.addWidget(self.symbol_input, 1)
