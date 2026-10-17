@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QToolTip, QVBoxLayout, QWidget
 
@@ -21,6 +20,7 @@ GAP = 2       # 칸 사이 바탕색 틈
 RADIUS = 4    # 막대 양 끝 둥글기
 LEGEND_COLUMNS = 3   # 줄 수를 줄여 창 최소 높이를 아낀다(Mock_QA AL2)
 LEGEND_MIN_WIDTH = 90
+UNPRICED_MARK = " (시세 없음)"
 
 
 def slice_color(item: Slice) -> QColor:
@@ -31,7 +31,7 @@ def slice_color(item: Slice) -> QColor:
 
 def describe_suffix(item: Slice) -> str:
     """이름 뒤에 붙는 부분(줄여도 항상 보인다): 시세 없음 표시, 비중, 금액."""
-    unpriced = " (시세 없음)" if not item.priced else ""  # 원가로 평가한 금액(Mock_QA AL4)
+    unpriced = UNPRICED_MARK if not item.priced else ""  # 원가로 평가한 금액(Mock_QA AL4)
     return f"{unpriced} {item.share_text} · {fmt.won(item.value)}"
 
 
@@ -126,7 +126,8 @@ class LegendLabel(QLabel):
 
     def shown_text(self) -> str:
         """좁으면 차례로 줄인다: ① 이름만 말줄임 ② 금액을 빼고(툴팁에 있음) 이름 말줄임 ③ 전체 말줄임.
-        이름은 최소 두 글자 + …는 남긴다(어느 종목인지는 보이게)."""
+        이름은 최소 두 글자 + …는 남긴다(어느 종목인지는 보이게). ③에서도 "(시세 없음)"은 지우지 않는다
+        — 원가로 평가한 비중이라는 표시가 사라지면 실제 값처럼 읽힌다(Mock_Sequrity Info, FitLabel 부호 보존과 같은 취지)."""
         metrics = QFontMetrics(self.font())
         width = self.contentsRect().width()
         label = self.item.label
@@ -135,6 +136,12 @@ class LegendLabel(QLabel):
             room = width - metrics.horizontalAdvance(suffix)
             if metrics.horizontalAdvance(label) <= room or room >= min_name:
                 return metrics.elidedText(label, Qt.ElideRight, room) + suffix
+        if not self.item.priced:
+            marker = UNPRICED_MARK
+            room = width - metrics.horizontalAdvance(marker)
+            if room <= 0:
+                return metrics.elidedText(marker.strip(), Qt.ElideRight, width)
+            return metrics.elidedText(label, Qt.ElideRight, room) + marker
         return metrics.elidedText(self.text(), Qt.ElideRight, width)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
