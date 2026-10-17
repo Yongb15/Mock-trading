@@ -426,3 +426,164 @@ def test_lookup_button_behaves_like_enter(window, app):
     window.symbol_input.setText("005930")
     lookup.click()
     assert len(queued) == 1
+def test_chart_range_reloads_only_history(window, app):
+    """기간 버튼은 차트만 그 기간으로 다시 받는다. 제목·축 형식이 기간을 따른다."""
+    from datetime import datetime, timedelta
+    from decimal import Decimal
+
+    from mock_trading.market_data import HISTORY_PERIODS, PricePoint
+    from mock_trading.ui.main_window import CHART_RANGES
+
+    assert {period for period, _ in CHART_RANGES} <= HISTORY_PERIODS  # 공급자가 허용하는 기간만
+    asked = []
+    start = datetime(2025, 1, 2)
+
+    def history(symbol, period="3mo"):
+        asked.append((symbol, period))
+        return [PricePoint(start + timedelta(days=i), Decimal(100 + i)) for i in range(5)]
+
+    window.broker.provider.get_history = history
+    window.load_quote("005930")
+    window.worker.wait(3000)
+    app.processEvents()
+    assert asked[-1] == ("005930.KS", "3mo")
+    year = next(b for b in window.chart_range_group.buttons() if b.property("value") == "1y")
+    year.click()
+    window.reader.wait(3000)
+    app.processEvents()
+    assert asked[-1] == ("005930.KS", "1y")
+    assert "최근 1년" in window.chart.title()
+    assert window.chart.axes(Qt.Horizontal)[0].format() == "yy/MM"
+    window.load_quote("005930")  # 자동 갱신도 고른 기간을 유지
+    window.worker.wait(3000)
+    app.processEvents()
+    assert asked[-1] == ("005930.KS", "1y")
+
+
+def test_late_chart_result_for_old_range_is_ignored(window, app):
+    """기간을 빠르게 바꾸면 늦게 온 이전 기간 결과로 차트를 덮어쓰지 않는다."""
+    from datetime import datetime
+    from decimal import Decimal
+
+    from mock_trading.market_data import PricePoint
+
+    window.load_quote("005930")
+    window.worker.wait(3000)
+    app.processEvents()
+    jobs = []
+    window.reader.run = lambda fn, done, failed: jobs.append((fn, done))
+    buttons = {b.property("value"): b for b in window.chart_range_group.buttons()}
+    buttons["5y"].click()
+    buttons["1mo"].click()
+    old_done = jobs[0][1]
+    old_done([PricePoint(datetime(2020, 1, 1), Decimal(1))])  # 5년 결과가 늦게 도착
+    assert "최근 5년" not in window.chart.title()
+
+
+def _hold_jobs(window):
+    """작업을 바로 실행하지 않고 붙잡아 둔다(도착 순서를 테스트가 정한다)."""
+    held = {"worker": [], "reader": []}
+    window.worker.run = lambda fn, done=None, failed=None: held["worker"].append((fn, done, failed))
+    window.reader.run = lambda fn, done=None, failed=None: held["reader"].append((fn, done, failed))
+    return held
+
+
+def _finish(job):
+    fn, done, failed = job
+    try:
+        result = fn()
+    except Exception as error:  # noqa: BLE001
+        failed(str(error))
+    else:
+        done(result)
+
+
+def _history_provider(window, asked):
+    from datetime import datetime, timedelta
+    from decimal import Decimal
+
+    from mock_trading.market_data import PricePoint
+
+    sizes = {"1mo": 20, "3mo": 60, "1y": 250, "5y": 1250}
+
+    def history(symbol, period="3mo"):
+        asked.append(period)
+        return [PricePoint(datetime(2020, 1, 1) + timedelta(days=i), Decimal(100)) for i in range(sizes[period])]
+
+    window.broker.provider.get_history = history
+
+
+def _open(window, app, symbol="005930"):
+    window.load_quote(symbol)
+    window.worker.wait(3000)
+    app.processEvents()
+
+
+def test_queued_quote_does_not_overwrite_newer_range(window, app):
+    """Mock_QA CR1: 대기열의 시세 조회(3개월)가 그사이 고른 5년 차트를 덮어쓰지 않는다. 제목과 데이터가 일치."""
+    asked = []
+    _history_provider(window, asked)
+    _open(window, app)
+    held = _hold_jobs(window)
+    window.load_quote("005930")  # 3개월로 다시 조회가 대기열에 있음
+    buttons = {b.property("value"): b for b in window.chart_range_group.buttons()}
+    buttons["5y"].click()
+    _finish(held["reader"].pop())  # 5년 차트 도착
+    _finish(held["worker"].pop())  # 늦게 3개월 시세 도착
+    assert len(window.current.history) == 1250 and window.current.period == "5y"
+    assert "최근 5년" in window.chart.title()
+    assert held["reader"] == []  # 다시 받을 필요 없음
+
+
+def test_auto_refresh_does_not_refetch_history(window, app):
+    """Mock_Sequrity CR1: 60초 자동 갱신은 시세만 받고 이력은 화면에 있는 것을 쓴다."""
+    asked = []
+    _history_provider(window, asked)
+    _open(window, app)
+    buttons = {b.property("value"): b for b in window.chart_range_group.buttons()}
+    held = _hold_jobs(window)
+    buttons["5y"].click()
+    _finish(held["reader"].pop())
+    asked.clear()
+    window.refresh_all()
+    for job in [j for j in held["worker"]]:
+        _finish(job)
+    assert asked == [] and len(window.current.history) == 1250 and "최근 5년" in window.chart.title()
+
+
+def test_range_reclick_and_rapid_clicks(window, app):
+    """Mock_Sequrity CR2: 같은 기간 재클릭은 무시, 받는 중 연타는 끝난 뒤 마지막 기간 한 번만."""
+    asked = []
+    _history_provider(window, asked)
+    _open(window, app)
+    held = _hold_jobs(window)
+    buttons = {b.property("value"): b for b in window.chart_range_group.buttons()}
+    buttons["3mo"].click()
+    assert held["reader"] == []
+    buttons["1y"].click()
+    buttons["5y"].click()
+    buttons["1mo"].click()
+    assert len(held["reader"]) == 1  # 진행 중인 1년 요청 하나뿐
+    _finish(held["reader"].pop())  # 1년 결과는 버리고 마지막(1개월)을 한 번 더
+    assert len(held["reader"]) == 1
+    _finish(held["reader"].pop())
+    assert window.current.period == "1mo" and len(window.current.history) == 20 and held["reader"] == []
+
+
+def test_failed_range_reverts_button(window, app):
+    """Mock_QA CR5: 차트를 못 받으면 버튼을 화면에 그려진 기간으로 되돌리고 알린다."""
+    asked = []
+    _history_provider(window, asked)
+    _open(window, app)
+    held = _hold_jobs(window)
+    buttons = {b.property("value"): b for b in window.chart_range_group.buttons()}
+
+    def broken(symbol, period="3mo"):
+        raise ConnectionError("down")
+
+    window.broker.provider.get_history = broken
+    buttons["5y"].click()
+    _finish(held["reader"].pop())
+    assert window._chart_period == "3mo" and buttons["3mo"].isChecked() and not buttons["5y"].isChecked()
+    assert "5년 차트를 받지 못했어요" in window.status.text()
+    assert held["reader"] == []
