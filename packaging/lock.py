@@ -10,6 +10,7 @@ SHA-256 해시로 고정한 파일을 만든다. 설치는 `pip install --requir
 
 직접 의존성 버전을 바꿨으면 이 스크립트로 셋을 함께 다시 만들고, 바뀐 lock도 리뷰를 받는다.
 """
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,9 @@ TARGETS = [
 
 
 def main() -> int:
+    if shutil.which("uv") is None:
+        print("uv가 필요합니다: https://docs.astral.sh/uv/getting-started/installation/ (예: winget install astral-sh.uv)")
+        return 1
     for output, inputs, python in TARGETS:
         command = ["uv", "pip", "compile", *inputs, "--python-version", python, "--python-platform", "windows",
                    "--generate-hashes", "-o", output]

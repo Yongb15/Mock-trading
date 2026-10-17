@@ -3,12 +3,33 @@
 한 파일(--onefile)로 묶으면 실행할 때마다 Qt를 임시 폴더에 풀어서 느리므로 폴더로 만든다.
 """
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
+from importlib import metadata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+LOCK = ROOT / "requirements-build.lock"
+_PIN = re.compile(r"^([A-Za-z0-9_.\-]+)==([^\s;\\#]+)")  # tests/test_locks.py와 같은 규칙
+
+
+def lock_mismatches(lock: Path = LOCK) -> list[str]:
+    """지금 환경에 설치된 버전이 빌드 lock과 다른 패키지(없거나 다르면). 리뷰한 lock = 배포물을 빌드 단계에서 강제한다."""
+    problems = []
+    for line in lock.read_text(encoding="utf-8").splitlines():
+        match = _PIN.match(line.strip())
+        if not match:
+            continue
+        name, wanted = match.groups()
+        try:
+            installed = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            installed = None
+        if installed != wanted:
+            problems.append(f"{name}: lock {wanted}, 설치됨 {installed or '없음'}")
+    return problems
 
 
 def make_icon(path: Path) -> None:
@@ -35,6 +56,13 @@ def make_icon(path: Path) -> None:
 
 
 def main() -> int:
+    problems = lock_mismatches()
+    if problems:
+        print("빌드 환경이 requirements-build.lock과 다릅니다(새 가상환경에서 아래로 설치한 뒤 빌드하세요):")
+        print("  pip install --require-hashes --only-binary :all: -r requirements-build.lock")
+        for problem in problems:
+            print("  - " + problem)
+        return 3
     for leftover in (ROOT / "build", ROOT / "dist" / "MockTrading"):
         shutil.rmtree(leftover, ignore_errors=True)
     icon = ROOT / "build" / "MockTrading.ico"
