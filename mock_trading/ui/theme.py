@@ -15,6 +15,11 @@ TEXT_SUB = "#5F6B7A"   # 흰 바탕·회색 바탕(#F2F4F6) 모두 대비 4.5:1 
 LINE = "#E5E8EB"
 ACCENT = "#1E5FD9"
 ACCENT_SOFT = "#E8EEFB"
+# 자산 구성 막대의 종목 색(검증된 범주형 팔레트 앞 5칸, 흰 바탕에서 색맹 구별·정상 시력 구별 통과).
+# 대비 3:1이 안 되는 색이 있어 막대 옆 범례에 이름·비중·금액을 글자로 함께 둔다. 기타·현금은 회색.
+SERIES_COLORS = ("#2A78D6", "#EB6834", "#1BAF7A", "#EDA100", "#E87BA4")
+SLICE_OTHER = "#8F8E88"
+SLICE_CASH = "#CFCEC8"
 
 # 설치돼 있으면 쓰고, 없으면 윈도우 기본 한글 글꼴로
 FONT_FAMILIES = ["Pretendard", "IBM Plex Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", "sans-serif"]

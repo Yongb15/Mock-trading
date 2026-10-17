@@ -587,3 +587,45 @@ def test_failed_range_reverts_button(window, app):
     assert window._chart_period == "3mo" and buttons["3mo"].isChecked() and not buttons["5y"].isChecked()
     assert "5년 차트를 받지 못했어요" in window.status.text()
     assert held["reader"] == []
+
+
+def test_allocation_panel_legend_and_tooltip_are_plain_text(window, app):
+    """자산 구성: 범례는 이름·비중·금액을 글자 그대로, 툴팁은 종목명을 HTML로 해석하지 않는다."""
+    from decimal import Decimal
+
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent, QTextDocument
+    from PySide6.QtWidgets import QToolTip
+
+    from mock_trading.allocation import Slice
+
+    name = "<b>Evil</b> & Co"
+    items = [Slice("X", name, Decimal(700), Decimal("70.0"), 0), Slice("현금", "현금", Decimal(300), Decimal("30.0"), None)]
+    panel = window.allocation_panel
+    panel.set_slices(items)
+    assert [label.text() for label in panel.legend_labels] == [f"{name} 70.0% · 700원", "현금 30.0% · 300원"]
+    assert all(label.textFormat() == Qt.PlainText for label in panel.legend_labels)
+    bar = panel.bar
+    bar.resize(400, 14)
+    bar.show()
+    app.processEvents()
+    event = QMouseEvent(QMouseEvent.MouseMove, QPointF(10, 7), bar.mapToGlobal(QPointF(10, 7)),
+                        Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+    shown = []
+    original = QToolTip.showText
+    QToolTip.showText = staticmethod(lambda pos, text, widget=None: shown.append(text))
+    try:
+        bar.mouseMoveEvent(event)
+    finally:
+        QToolTip.showText = original
+    doc = QTextDocument()
+    doc.setHtml(shown[0])
+    assert doc.toPlainText() == f"{name} 70.0% · 700원"
+
+
+def test_allocation_after_portfolio_load(window, app):
+    """계좌를 불러오면 자산 구성도 채워진다(처음엔 현금 100%)."""
+    window.load_portfolio()
+    window.worker.wait(3000)
+    app.processEvents()
+    assert [label.text().split(" ")[0] for label in window.allocation_panel.legend_labels] == ["현금"]
