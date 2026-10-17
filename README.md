@@ -1,5 +1,7 @@
 # 모의투자 (Mock Trading)
 
+[![tests](https://github.com/Yongb15/Mock-trading/actions/workflows/tests.yml/badge.svg?branch=develop)](https://github.com/Yongb15/Mock-trading/actions/workflows/tests.yml)
+
 실제 주식 시세(한국 · 미국)를 받아 와서, **가상의 기초 자금**으로 실제처럼 매수·매도를 연습하는 데스크톱 프로그램입니다.
 
 ![시연: 내 계좌 → 주식 주문(조회·매수·지정가) → 시장 순위 → 관심 종목 → 자산 추이](docs/demo.gif)
@@ -62,7 +64,7 @@ python -m mock_trading
 python -m pytest
 ```
 
-시세는 가짜 provider로 대신하므로 네트워크 없이 돌아갑니다.
+시세는 가짜 provider로 대신하므로 네트워크 없이 돌아갑니다. PR과 `develop`·`main`에 올라올 때마다 GitHub Actions가 Windows에서 Python 3.11·3.14로 같은 테스트를 돌립니다.
 
 ## 구조
 

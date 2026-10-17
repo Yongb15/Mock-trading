@@ -1,0 +1,39 @@
+# PR과 develop·main에 올라올 때마다 테스트를 돌린다. 앱이 Windows 데스크톱용이라 Windows에서,
+# 지원 범위의 양 끝(최소 3.11, 개발에 쓰는 3.14)에서 확인한다.
+name: tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read   # 코드를 읽기만 한다
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+    env:
+      QT_QPA_PLATFORM: offscreen   # 화면 없이 Qt 위젯 테스트
+      PYTHONIOENCODING: utf-8
+    steps:
+      # 외부 액션은 태그 대신 커밋 해시로 고정(태그가 바뀌어도 리뷰한 코드만 실행)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
