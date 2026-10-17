@@ -299,3 +299,21 @@ def test_elided_number_keeps_its_sign(app):
     plain.setFont(font)
     plain.resize(60, 40)
     assert plain.shown_text(plain.fitted_font()).startswith("…")
+
+
+def test_search_by_name_loads_the_quote(window, app):
+    """이름을 치면 목록이 뜨고, 고르거나 이름 그대로 Enter를 치면 그 종목을 조회한다."""
+    window._suggest_symbols("삼성전")
+    assert window.symbol_matches.stringList()[0] == "삼성전자  005930.KS"
+    window._pick_symbol("삼성전자  005930.KS")
+    window.worker.wait(3000)
+    app.processEvents()
+    assert window.symbol_input.text() == "005930.KS"
+    assert window.current and window.current.quote.symbol == "005930.KS"
+
+    window.current = None
+    window.symbol_input.setText("삼성전자")
+    window.load_quote()
+    window.worker.wait(3000)
+    app.processEvents()
+    assert window.current and window.current.quote.symbol == "005930.KS"

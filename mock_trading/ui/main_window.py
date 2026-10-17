@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, QSize, QStandardPaths, Qt, QTime, QTimer
+from PySide6.QtCore import QDateTime, QSize, QStandardPaths, QStringListModel, Qt, QTime, QTimer
 from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QComboBox,
+    QCompleter,
     QFileDialog,
     QDoubleSpinBox,
     QSpinBox,
@@ -50,6 +51,7 @@ from ..domain import (
 from ..history import AssetPoint, DailyCloseCache, load_asset_history
 from ..market_data import PricePoint
 from ..export import write_trades_csv
+from .. import symbols
 from ..market_rank import Market, MarketRanking, RankBy, Ranking
 from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
@@ -339,9 +341,16 @@ class MainWindow(QMainWindow):
 
         search = QHBoxLayout()
         self.symbol_input = QLineEdit()
-        self.symbol_input.setPlaceholderText("종목 코드 (005930, AAPL ...)")
-        self.symbol_input.setMaxLength(15)
+        self.symbol_input.setPlaceholderText("종목 이름이나 코드 (삼성전자, 005930, 애플, AAPL)")
+        self.symbol_input.setMaxLength(40)  # 목록에서 고른 "이름  코드"가 들어갈 만큼
         self.symbol_input.returnPressed.connect(self.load_quote)
+        # 이름 자동 완성: 직접 찾은 결과(초성·한글 별칭 포함)를 그대로 보여 준다(QCompleter 자체 필터는 끔)
+        self.symbol_matches = QStringListModel(self)
+        self.symbol_completer = QCompleter(self.symbol_matches, self)
+        self.symbol_completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self.symbol_completer.setWidget(self.symbol_input)
+        self.symbol_completer.activated.connect(self._pick_symbol)
+        self.symbol_input.textEdited.connect(self._suggest_symbols)
         lookup = QPushButton("조회")
         lookup.clicked.connect(self.load_quote)
         search.addWidget(self.symbol_input, 1)
@@ -683,8 +692,21 @@ class MainWindow(QMainWindow):
 
         self.worker.run(job, done, failed)
 
+    def _suggest_symbols(self, text: str) -> None:
+        matches = symbols.search(text)
+        self.symbol_matches.setStringList([m.label for m in matches])
+        if matches:
+            self.symbol_completer.complete()
+        else:
+            self.symbol_completer.popup().hide()
+
+    def _pick_symbol(self, label: str) -> None:
+        symbol = symbols.resolve(label)
+        self.symbol_input.setText(symbol)
+        self.load_quote(symbol)
+
     def load_quote(self, symbol: str | None = None) -> None:
-        symbol = symbol or self.symbol_input.text()
+        symbol = symbols.resolve(symbol or self.symbol_input.text())  # 이름이면 코드로
         if not symbol.strip():
             return
         self.status.setText(f"{symbol} 시세를 불러오는 중...")
