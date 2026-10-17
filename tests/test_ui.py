@@ -629,3 +629,75 @@ def test_allocation_after_portfolio_load(window, app):
     window.worker.wait(3000)
     app.processEvents()
     assert [label.text().split(" ")[0] for label in window.allocation_panel.legend_labels] == ["현금"]
+
+
+def test_long_names_in_allocation_legend_do_not_widen_window(window, app):
+    """Mock_QA AL1: 범례에 긴 종목명 7칸이 있어도 창 최소 폭 ≤ 1000. 이름만 줄고 비중·금액은 보인다."""
+    from decimal import Decimal
+
+    from mock_trading.allocation import Slice
+    from mock_trading.ui.theme import apply_theme
+
+    font = app.font()
+    apply_theme(app)
+    try:
+        long = "아주긴이름 Holdings Corporation International " * 2
+        items = [Slice(f"S{i}", f"종목{i} {long}", Decimal(100), Decimal("12.5"), i) for i in range(5)]
+        items += [Slice("기타", "기타 3종목", Decimal(100), Decimal("12.5"), None),
+                  Slice("현금", "현금", Decimal(100), Decimal("12.5"), None)]
+        window.allocation_panel.set_slices(items)
+        window.tabs.setCurrentWidget(window.account_page)
+        app.processEvents()
+        assert window.minimumSizeHint().width() <= 1000
+        window.resize(1000, 760)
+        window.show()
+        app.processEvents()
+        label = window.allocation_panel.legend_labels[0]
+        shown = label.shown_text()
+        # 이름 앞부분과 비중은 항상 보이고(금액은 자리가 없으면 툴팁으로), 전체는 툴팁에
+        assert shown != label.text() and shown.startswith("종목0") and "12.5%" in shown and "…" in shown
+        assert label.toolTip() and label.text() == items[0].label + " 12.5% · 100원"
+    finally:
+        app.setStyleSheet("")
+        app.setFont(font)
+
+
+def test_allocation_marks_unpriced_and_tiny_shares(window, app):
+    """Mock_QA AL4·AL5: 시세 없음(원가 평가)은 표시하고, 0.1% 미만은 <0.1%."""
+    from decimal import Decimal
+
+    from mock_trading.allocation import Slice
+
+    items = [Slice("A", "알파", Decimal(999), Decimal("99.9"), 0, priced=False),
+             Slice("현금", "현금", Decimal(1), Decimal("0.0"), None)]
+    window.allocation_panel.set_slices(items)
+    texts = [label.text() for label in window.allocation_panel.legend_labels]
+    assert texts == ["알파 (시세 없음) 99.9% · 999원", "현금 <0.1% · 1원"]
+
+
+def test_allocation_says_loading_before_first_portfolio(app):
+    """Mock_QA AL3: 첫 계좌 로드 전에는 '없어요'가 아니라 '불러오는 중'."""
+    from mock_trading.ui.allocation_bar import AllocationPanel
+
+    panel = AllocationPanel()
+    assert "불러오는 중" in panel.empty.text()
+    panel.set_slices([])
+    assert "없어요" in panel.empty.text()
+
+
+def test_unpriced_long_name_keeps_some_name_visible(app):
+    """'(시세 없음)'이 붙어 좁아도 이름 앞부분은 남는다(필요하면 금액을 먼저 뺀다 — 툴팁에 전체)."""
+    from decimal import Decimal
+
+    from mock_trading.allocation import Slice
+    from mock_trading.ui.allocation_bar import LegendLabel
+
+    item = Slice("A", "알파베타 아주긴이름 Holdings Corporation", Decimal(1_234_567), Decimal("12.5"), 0, priced=False)
+    label = LegendLabel(item)
+    label.resize(label.fontMetrics().horizontalAdvance("알파… (시세 없음) 12.5%") + 4, 20)
+    label.show()
+    app.processEvents()
+    shown = label.shown_text()
+    assert shown.startswith("알파") and "(시세 없음)" in shown and "12.5%" in shown
+    assert label.toolTip()
+    label.close()

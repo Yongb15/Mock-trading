@@ -19,6 +19,12 @@ class Slice:
     value: Decimal      # 원화 금액
     share: Decimal      # 총자산 대비 비중(%)
     slot: int | None    # 색 슬롯(0부터). 기타·현금은 None(회색)
+    priced: bool = True  # False면 시세를 못 받아 원가로 평가한 금액이 섞여 있다
+
+    @property
+    def share_text(self) -> str:
+        """0.1% 단위. 0보다 크지만 0.1%가 안 되는 칸은 0.0%가 아니라 <0.1%(Mock_QA AL5)."""
+        return "<0.1%" if self.value > 0 and self.share < Decimal("0.1") else f"{self.share}%"
 
 
 def slices(positions: list[Position], cash: Decimal, *, max_named: int = MAX_NAMED) -> list[Slice]:
@@ -26,6 +32,8 @@ def slices(positions: list[Position], cash: Decimal, *, max_named: int = MAX_NAM
 
     색은 순위가 아니라 종목을 따라간다: 보이는 종목끼리 처음 산 순서(positions 순서)로 슬롯을 준다.
     그래서 값이 오르내려 순서가 바뀌어도 같은 종목은 같은 색이다.
+    한계(Mock_QA AL6): 상위 5개에 드는 종목 구성이 바뀌면(하나가 기타로 빠지거나 새로 들면) 그보다 늦게 산
+    종목들의 슬롯이 한 칸씩 밀린다. 색 5개로는 피하기 어려워 이대로 둔다.
     """
     held = [p for p in positions if p.value_krw > 0]
     named = sorted(held, key=lambda p: p.value_krw, reverse=True)[:max_named]
@@ -43,11 +51,11 @@ def slices(positions: list[Position], cash: Decimal, *, max_named: int = MAX_NAM
     def share(value: Decimal) -> Decimal:
         return (value / total * 100).quantize(Decimal("0.1"))
 
-    out = [Slice(p.holding.symbol, p.holding.name, p.value_krw, share(p.value_krw), slot_of[p.holding.symbol])
-           for p in named]
+    out = [Slice(p.holding.symbol, p.holding.name, p.value_krw, share(p.value_krw), slot_of[p.holding.symbol],
+                 p.has_price) for p in named]
     if rest > 0:
-        others = len(held) - len(named)
-        out.append(Slice("기타", f"기타 {others}종목", rest, share(rest), None))
+        tail = [p for p in held if p.holding.symbol not in named_symbols]
+        out.append(Slice("기타", f"기타 {len(tail)}종목", rest, share(rest), None, all(p.has_price for p in tail)))
     if cash > 0:
         out.append(Slice("현금", "현금", cash, share(cash), None))
     return out

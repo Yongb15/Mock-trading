@@ -8,7 +8,8 @@ from __future__ import annotations
 import html
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QToolTip, QVBoxLayout, QWidget
 
 from ..allocation import Slice
@@ -18,7 +19,8 @@ from .theme import SERIES_COLORS, SLICE_CASH, SLICE_OTHER
 BAR_HEIGHT = 14
 GAP = 2       # 칸 사이 바탕색 틈
 RADIUS = 4    # 막대 양 끝 둥글기
-LEGEND_COLUMNS = 2
+LEGEND_COLUMNS = 3   # 줄 수를 줄여 창 최소 높이를 아낀다(Mock_QA AL2)
+LEGEND_MIN_WIDTH = 90
 
 
 def slice_color(item: Slice) -> QColor:
@@ -27,8 +29,14 @@ def slice_color(item: Slice) -> QColor:
     return QColor(SLICE_CASH if item.key == "현금" else SLICE_OTHER)
 
 
+def describe_suffix(item: Slice) -> str:
+    """이름 뒤에 붙는 부분(줄여도 항상 보인다): 시세 없음 표시, 비중, 금액."""
+    unpriced = " (시세 없음)" if not item.priced else ""  # 원가로 평가한 금액(Mock_QA AL4)
+    return f"{unpriced} {item.share_text} · {fmt.won(item.value)}"
+
+
 def describe(item: Slice) -> str:
-    return f"{item.label} {item.share}% · {fmt.won(item.value)}"
+    return item.label + describe_suffix(item)
 
 
 class AllocationBar(QWidget):
@@ -101,6 +109,49 @@ class _Swatch(QWidget):
         painter.drawRoundedRect(QRectF(self.rect()), 2, 2)
 
 
+class LegendLabel(QLabel):
+    """범례 한 칸. 글자 길이가 창 최소 폭을 정하지 않게 최소 폭을 고정하고, 좁으면 이름만 말줄임한다.
+
+    비중·금액은 잘리지 않고, 이름이 잘렸을 때만 전체 문구를 툴팁으로 보여 준다(Mock_QA AL1).
+    text()는 전체 문구 그대로라 스크린 리더도 전부 읽는다.
+    """
+
+    def __init__(self, item: Slice) -> None:
+        super().__init__(describe(item))
+        self.setTextFormat(Qt.PlainText)  # 종목명은 외부(시세 출처)에서 온 글자
+        self.item = item
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt 이름 규칙)
+        return QSize(LEGEND_MIN_WIDTH, super().minimumSizeHint().height())
+
+    def shown_text(self) -> str:
+        """좁으면 차례로 줄인다: ① 이름만 말줄임 ② 금액을 빼고(툴팁에 있음) 이름 말줄임 ③ 전체 말줄임.
+        이름은 최소 두 글자 + …는 남긴다(어느 종목인지는 보이게)."""
+        metrics = QFontMetrics(self.font())
+        width = self.contentsRect().width()
+        label = self.item.label
+        min_name = metrics.horizontalAdvance(label[:2] + "…")
+        for suffix in (describe_suffix(self.item), describe_suffix(self.item).split(" · ")[0]):
+            room = width - metrics.horizontalAdvance(suffix)
+            if metrics.horizontalAdvance(label) <= room or room >= min_name:
+                return metrics.elidedText(label, Qt.ElideRight, room) + suffix
+        return metrics.elidedText(self.text(), Qt.ElideRight, width)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
+        super().resizeEvent(event)
+        elided = self.shown_text() != self.text()
+        self.setToolTip(f"<p style='white-space:pre'>{html.escape(self.text())}</p>" if elided else "")
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 이름 규칙)
+        text = self.shown_text()
+        if text == self.text():
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(self.contentsRect(), int(self.alignment() | Qt.AlignVCenter), text)
+
+
 class AllocationPanel(QWidget):
     """막대 + 범례(색 견본, 이름, 비중, 금액). 범례가 막대의 글자 라벨 역할을 한다."""
 
@@ -113,9 +164,11 @@ class AllocationPanel(QWidget):
         layout.addWidget(self.bar)
         self.legend = QGridLayout()
         self.legend.setHorizontalSpacing(24)
+        for column in range(LEGEND_COLUMNS):
+            self.legend.setColumnStretch(column, 1)  # 열 폭을 고르게(이름 길이에 따라 들쭉날쭉하지 않게)
         self.legend.setVerticalSpacing(6)
         layout.addLayout(self.legend)
-        self.empty = QLabel("보유 종목과 현금이 없어요")
+        self.empty = QLabel("불러오는 중…")  # 첫 계좌 로드 전(Mock_QA AL3)
         self.empty.setTextFormat(Qt.PlainText)
         self.empty.setObjectName("caption")
         layout.addWidget(self.empty)
@@ -135,11 +188,11 @@ class AllocationPanel(QWidget):
             line.setContentsMargins(0, 0, 0, 0)
             line.setSpacing(8)
             line.addWidget(_Swatch(slice_color(item)), 0, Qt.AlignVCenter)
-            label = QLabel(describe(item))
-            label.setTextFormat(Qt.PlainText)  # 종목명은 외부(시세 출처)에서 온 글자
+            label = LegendLabel(item)
             line.addWidget(label, 1)
             self.legend.addWidget(cell, row, column)
             self.legend_labels.append(label)
+        self.empty.setText("보유 종목과 현금이 없어요")
         self.empty.setVisible(not slices)
 
 
