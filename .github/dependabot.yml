@@ -1,0 +1,8 @@
+# 워크플로에 커밋 해시로 고정한 GitHub 액션의 새 버전이 나오면 해시를 바꾸는 PR을 연다(그 PR도 리뷰 후 병합).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    target-branch: develop
