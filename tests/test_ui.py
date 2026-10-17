@@ -701,3 +701,20 @@ def test_unpriced_long_name_keeps_some_name_visible(app):
     assert shown.startswith("알파") and "(시세 없음)" in shown and "12.5%" in shown
     assert label.toolTip()
     label.close()
+
+
+def test_unpriced_mark_survives_the_narrowest_elide(app):
+    """Mock_Sequrity Info: 가장 좁아(③ 전체 말줄임) 비중이 잘려도 '(시세 없음)'은 남는다."""
+    from decimal import Decimal
+
+    from mock_trading.allocation import Slice
+    from mock_trading.ui.allocation_bar import UNPRICED_MARK, LegendLabel
+
+    item = Slice("A", "<img src=x>Evil Corporation Holdings", Decimal(1_234_567), Decimal("12.5"), 0, priced=False)
+    label = LegendLabel(item)
+    for extra in (30, 0, -40):
+        label.resize(label.fontMetrics().horizontalAdvance(UNPRICED_MARK) + extra, 20)
+        shown = label.shown_text()
+        assert "시세 없음" in shown or shown.endswith("…")
+    label.resize(label.fontMetrics().horizontalAdvance(UNPRICED_MARK) + 30, 20)
+    assert label.shown_text().endswith(UNPRICED_MARK)
