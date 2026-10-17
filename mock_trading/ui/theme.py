@@ -4,7 +4,8 @@
 """
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QFont, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication
 
 BACKGROUND = "#F2F4F6"
@@ -14,6 +15,11 @@ TEXT_SUB = "#5F6B7A"   # 흰 바탕·회색 바탕(#F2F4F6) 모두 대비 4.5:1 
 LINE = "#E5E8EB"
 ACCENT = "#1E5FD9"
 ACCENT_SOFT = "#E8EEFB"
+# 자산 구성 막대의 종목 색(검증된 범주형 팔레트 앞 5칸, 흰 바탕에서 색맹 구별·정상 시력 구별 통과).
+# 대비 3:1이 안 되는 색이 있어 막대 옆 범례에 이름·비중·금액을 글자로 함께 둔다. 기타·현금은 회색.
+SERIES_COLORS = ("#2A78D6", "#EB6834", "#1BAF7A", "#EDA100", "#E87BA4")
+SLICE_OTHER = "#8F8E88"
+SLICE_CASH = "#CFCEC8"
 
 # 설치돼 있으면 쓰고, 없으면 윈도우 기본 한글 글꼴로
 FONT_FAMILIES = ["Pretendard", "IBM Plex Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", "sans-serif"]
@@ -67,6 +73,16 @@ QPushButton#chip {{
 }}
 QPushButton#chip:checked {{ background: {TEXT}; border-color: {TEXT}; color: #FFFFFF; }}
 QPushButton#chip:focus {{ border-color: {ACCENT}; }}
+QPushButton#chipSmall {{
+    background: {CARD};
+    border: 2px solid {LINE};
+    border-radius: 13px;
+    padding: 2px 9px;
+    color: #4E5968;
+    font-size: 12px;
+}}
+QPushButton#chipSmall:checked {{ background: {TEXT}; border-color: {TEXT}; color: #FFFFFF; }}
+QPushButton#chipSmall:focus {{ border-color: {ACCENT}; }}
 QPushButton {{
     background: {BACKGROUND};
     border: 2px solid transparent;
@@ -194,3 +210,58 @@ def style_axes(chart) -> None:
         axis.setGridLineColor(QColor(LINE))
         axis.setLinePen(QPen(QColor(LINE)))
         axis.setTitleBrush(QColor(TEXT_SUB))
+
+
+ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+
+
+def draw_icon(size: int) -> QPixmap:
+    """앱 아이콘: 파란 둥근 사각형 위에 올라가는 막대 셋과 추세선. 창·작업 표시줄·exe 아이콘이 모두 이 그림을 쓴다.
+
+    작은 크기(16~24px)에서는 선이 뭉개지므로 막대만 그린다.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    s = float(size)
+    gradient = QLinearGradient(0, 0, 0, s)
+    gradient.setColorAt(0, QColor("#3B7BF0"))
+    gradient.setColorAt(1, QColor(ACCENT))
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(gradient)
+    painter.drawRoundedRect(QRectF(0, 0, s, s), s * 0.22, s * 0.22)
+
+    small = size <= 24
+    base = s * 0.80
+    width = s * (0.16 if small else 0.13)
+    lefts = (0.20, 0.42, 0.64) if small else (0.22, 0.435, 0.65)
+    heights = (0.24, 0.38, 0.54) if small else (0.20, 0.30, 0.42)
+    painter.setBrush(QColor(255, 255, 255, 255 if small else 150))
+    for left, height in zip(lefts, heights):
+        painter.drawRoundedRect(QRectF(s * left, base - s * height, width, s * height), width * 0.25, width * 0.25)
+
+    if not small:
+        points = [QPointF(s * 0.20, s * 0.50), QPointF(s * 0.42, s * 0.40),
+                  QPointF(s * 0.58, s * 0.46), QPointF(s * 0.80, s * 0.22)]
+        path = QPainterPath(points[0])
+        for point in points[1:]:
+            path.lineTo(point)
+        painter.setBrush(Qt.NoBrush)
+        pen = QPen(QColor("white"), s * 0.065)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.drawPath(path)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("white"))
+        painter.drawEllipse(points[-1], s * 0.075, s * 0.075)
+    painter.end()
+    return pixmap
+
+
+def app_icon() -> QIcon:
+    icon = QIcon()
+    for size in ICON_SIZES:
+        icon.addPixmap(draw_icon(size))
+    return icon

@@ -11,14 +11,40 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def make_icon(path: Path) -> None:
+    """앱 창과 같은 그림(theme.draw_icon)으로 exe 아이콘(.ico, 여러 크기)을 만든다. pillow가 필요하다."""
+    from io import BytesIO
+
+    from PIL import Image
+    from PySide6.QtCore import QBuffer, QIODevice
+    from PySide6.QtGui import QGuiApplication
+
+    sys.path.insert(0, str(ROOT))
+    from mock_trading.ui.theme import ICON_SIZES, draw_icon
+
+    app = QGuiApplication.instance() or QGuiApplication([])  # noqa: F841 (QPixmap에 필요)
+    images = []
+    for size in ICON_SIZES:
+        buffer = QBuffer()
+        buffer.open(QIODevice.ReadWrite)
+        draw_icon(size).save(buffer, "PNG")
+        images.append(Image.open(BytesIO(bytes(buffer.data()))).convert("RGBA"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    largest = images[-1]
+    largest.save(path, format="ICO", sizes=[i.size for i in images], append_images=images[:-1])
+
+
 def main() -> int:
     for leftover in (ROOT / "build", ROOT / "dist" / "MockTrading"):
         shutil.rmtree(leftover, ignore_errors=True)
+    icon = ROOT / "build" / "MockTrading.ico"
+    make_icon(icon)
     command = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--windowed",                 # 콘솔 창 없이
         "--name", "MockTrading",
+        "--icon", str(icon),
         "--specpath", str(ROOT / "build"),  # 생성되는 .spec은 build/에(저장소에 남기지 않음)
         "--paths", str(ROOT),
         # yfinance가 쓰는 HTTP 라이브러리의 인증서·바이너리
@@ -28,6 +54,7 @@ def main() -> int:
         "--exclude-module", "tkinter",
         "--exclude-module", "matplotlib",
         "--exclude-module", "pytest",
+        "--exclude-module", "PIL",    # 아이콘을 만들 때만 쓰는 빌드 도구라 묶음에 넣지 않는다
         str(ROOT / "packaging" / "run_app.py"),
     ]
     print(" ".join(command))
