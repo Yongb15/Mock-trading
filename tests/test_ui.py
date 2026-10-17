@@ -260,7 +260,7 @@ def test_summary_number_elides_front_instead_of_cutting_off(app):
     fitted = label.fitted_font()
     assert fitted.pixelSize() == FitLabel.MIN_PIXEL
     shown = label.shown_text(fitted)
-    assert shown.startswith("…") and shown.endswith("원")
+    assert shown.startswith("-…") and shown.endswith("원")  # 부호는 남기고 앞자리만 생략(E1)
     assert QFontMetrics(fitted).horizontalAdvance(shown) <= label.contentsRect().width()
     doc = QTextDocument()
     doc.setHtml(label.toolTip())
@@ -277,3 +277,25 @@ def test_table_headers_have_tooltips(window):
         for column in range(table.columnCount()):
             item = table.horizontalHeaderItem(column)
             assert item.toolTip() == item.text()
+
+
+def test_elided_number_keeps_its_sign(app):
+    """Mock_QA E1: 앞자리를 생략해도 +/- 부호는 남는다(지우면 손실이 이익처럼 보인다)."""
+    from PySide6.QtGui import QFont, QFontMetrics
+
+    from mock_trading.ui.main_window import FitLabel
+
+    font = QFont()
+    font.setPixelSize(22)
+    for text in ["-1,999,999,999원", "+1,234,567,890원", "-12.34%"]:
+        label = FitLabel(text, min_width=40)
+        label.setFont(font)
+        label.resize(60, 40)
+        fitted = label.fitted_font()
+        shown = label.shown_text(fitted)
+        assert shown[0] == text[0] and "…" in shown
+        assert QFontMetrics(fitted).horizontalAdvance(shown) <= label.contentsRect().width()
+    plain = FitLabel("1,999,999,999원", min_width=40)
+    plain.setFont(font)
+    plain.resize(60, 40)
+    assert plain.shown_text(plain.fitted_font()).startswith("…")
