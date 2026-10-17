@@ -68,6 +68,16 @@ QPushButton#chip {{
 }}
 QPushButton#chip:checked {{ background: {TEXT}; border-color: {TEXT}; color: #FFFFFF; }}
 QPushButton#chip:focus {{ border-color: {ACCENT}; }}
+QPushButton#chipSmall {{
+    background: {CARD};
+    border: 2px solid {LINE};
+    border-radius: 13px;
+    padding: 2px 9px;
+    color: #4E5968;
+    font-size: 12px;
+}}
+QPushButton#chipSmall:checked {{ background: {TEXT}; border-color: {TEXT}; color: #FFFFFF; }}
+QPushButton#chipSmall:focus {{ border-color: {ACCENT}; }}
 QPushButton {{
     background: {BACKGROUND};
     border: 2px solid transparent;

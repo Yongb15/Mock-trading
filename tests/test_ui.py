@@ -426,3 +426,55 @@ def test_lookup_button_behaves_like_enter(window, app):
     window.symbol_input.setText("005930")
     lookup.click()
     assert len(queued) == 1
+def test_chart_range_reloads_only_history(window, app):
+    """기간 버튼은 차트만 그 기간으로 다시 받는다. 제목·축 형식이 기간을 따른다."""
+    from datetime import datetime, timedelta
+    from decimal import Decimal
+
+    from mock_trading.market_data import HISTORY_PERIODS, PricePoint
+    from mock_trading.ui.main_window import CHART_RANGES
+
+    assert {period for period, _ in CHART_RANGES} <= HISTORY_PERIODS  # 공급자가 허용하는 기간만
+    asked = []
+    start = datetime(2025, 1, 2)
+
+    def history(symbol, period="3mo"):
+        asked.append((symbol, period))
+        return [PricePoint(start + timedelta(days=i), Decimal(100 + i)) for i in range(5)]
+
+    window.broker.provider.get_history = history
+    window.load_quote("005930")
+    window.worker.wait(3000)
+    app.processEvents()
+    assert asked[-1] == ("005930.KS", "3mo")
+    year = next(b for b in window.chart_range_group.buttons() if b.property("value") == "1y")
+    year.click()
+    window.reader.wait(3000)
+    app.processEvents()
+    assert asked[-1] == ("005930.KS", "1y")
+    assert "최근 1년" in window.chart.title()
+    assert window.chart.axes(Qt.Horizontal)[0].format() == "yy/MM"
+    window.load_quote("005930")  # 자동 갱신도 고른 기간을 유지
+    window.worker.wait(3000)
+    app.processEvents()
+    assert asked[-1] == ("005930.KS", "1y")
+
+
+def test_late_chart_result_for_old_range_is_ignored(window, app):
+    """기간을 빠르게 바꾸면 늦게 온 이전 기간 결과로 차트를 덮어쓰지 않는다."""
+    from datetime import datetime
+    from decimal import Decimal
+
+    from mock_trading.market_data import PricePoint
+
+    window.load_quote("005930")
+    window.worker.wait(3000)
+    app.processEvents()
+    jobs = []
+    window.reader.run = lambda fn, done, failed: jobs.append((fn, done))
+    buttons = {b.property("value"): b for b in window.chart_range_group.buttons()}
+    buttons["5y"].click()
+    buttons["1mo"].click()
+    old_done = jobs[0][1]
+    old_done([PricePoint(datetime(2020, 1, 1), Decimal(1))])  # 5년 결과가 늦게 도착
+    assert "최근 5년" not in window.chart.title()

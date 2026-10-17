@@ -61,6 +61,9 @@ from .worker import Worker
 AUTO_REFRESH_MS = 60_000
 CLOSE_WAIT_MS = 3_000
 DEFAULT_INITIAL_CASH = 10_000_000
+# 차트 기간(yfinance period, 버튼 글자). market_data.HISTORY_PERIODS 안에서만 고른다.
+CHART_RANGES = [("1mo", "1개월"), ("3mo", "3개월"), ("1y", "1년"), ("5y", "5년")]
+DEFAULT_CHART_RANGE = "3mo"
 FIT_COLUMN_MAX = 280  # 내용에 맞추는 열의 최대 폭(긴 종목명이 다른 열을 밀어내지 않게)
 
 
@@ -244,6 +247,7 @@ class MainWindow(QMainWindow):
         self._rank_loading = False
         self._rank_reload = False
         self._rank_market = Market.KR
+        self._chart_period = DEFAULT_CHART_RANGE
         self._rank_by = RankBy.GAINERS
         self._orders_checking = False
         self._unseen_order_events = 0
@@ -451,7 +455,49 @@ class MainWindow(QMainWindow):
         view = QChartView(self.chart)
         view.setFocusPolicy(Qt.NoFocus)  # 보기만 하는 차트는 Tab 순서에서 뺀다
         view.setRenderHint(QPainter.Antialiasing)
-        return view
+
+        holder = QWidget()
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 0, 0)
+        ranges = QHBoxLayout()
+        ranges.addStretch(1)
+        self.chart_range_group = QButtonGroup(self)
+        self.chart_range_group.setExclusive(True)
+        for period, label in CHART_RANGES:
+            button = QPushButton(label)
+            button.setObjectName("chipSmall")  # 차트 칸이 좁아도 창 최소 폭을 늘리지 않게 작은 버튼
+            button.setCheckable(True)
+            button.setChecked(period == self._chart_period)
+            button.setProperty("value", period)
+            button.setAccessibleName(f"차트 기간 {label}")
+            # 기본 스타일의 버튼 최소 폭(약 80px)이 다섯 개 쌓여 창 최소 폭을 늘리지 않게 글자 폭 기준으로
+            button.setMinimumWidth(button.fontMetrics().horizontalAdvance(label) + 24)
+            self.chart_range_group.addButton(button)
+            ranges.addWidget(button)
+        self.chart_range_group.buttonClicked.connect(self._on_chart_range)
+        layout.addLayout(ranges)
+        layout.addWidget(view, 1)
+        return holder
+
+    def _chart_label(self) -> str:
+        return dict(CHART_RANGES)[self._chart_period]
+
+    def _on_chart_range(self, button: QPushButton) -> None:
+        """기간만 바꾸면 차트만 다시 받는다(시세·주문 정보는 그대로). 느린 조회라 읽기 전용 풀에서."""
+        self._chart_period = button.property("value")
+        if not self.current:
+            return
+        quote, period = self.current.quote, self._chart_period
+        self.status.setText(f"{quote.symbol} {self._chart_label()} 차트를 불러오는 중...")
+
+        def done(history: list[PricePoint]) -> None:
+            # 그사이 다른 종목을 열었거나 기간을 또 바꿨으면 늦게 온 결과는 버린다
+            if self.current and self.current.quote.symbol == quote.symbol and self._chart_period == period:
+                self.current.history = history
+                self._draw_chart(self.current.quote, history)
+                self.status.setText(f"{quote.symbol} {self._chart_label()} 차트")
+
+        self.reader.run(lambda: self.broker.provider.get_history(quote.symbol, period), done, self._show_error)
 
     def _build_rank_page(self) -> QWidget:
         page = self.rank_page = QWidget()
@@ -755,10 +801,11 @@ class MainWindow(QMainWindow):
                 self._suggest_symbols(symbol)
                 return
         self.status.setText(f"{symbol} 시세를 불러오는 중...")
+        period = self._chart_period
 
         def job() -> _QuoteView:
             quote = self.broker.provider.get_quote(symbol)
-            history = self.broker.provider.get_history(quote.symbol)
+            history = self.broker.provider.get_history(quote.symbol, period)
             fx_rate = self.broker.fx_rate_for(quote.currency)
             held = self.broker.repo.holdings().get(quote.symbol)
             return _QuoteView(
@@ -1363,7 +1410,7 @@ class MainWindow(QMainWindow):
         self.chart.addSeries(series)
 
         x_axis = QDateTimeAxis()
-        x_axis.setFormat("MM/dd")
+        x_axis.setFormat("yy/MM" if self._chart_period in ("1y", "5y") else "MM/dd")
         y_axis = QValueAxis()
         y_axis.setLabelFormat("%.0f" if quote.currency.value == "KRW" else "%.2f")
         closes = [float(p.close) for p in history]
@@ -1374,7 +1421,7 @@ class MainWindow(QMainWindow):
         series.attachAxis(x_axis)
         series.attachAxis(y_axis)
         style_axes(self.chart)
-        self.chart.setTitle(html.escape(f"{quote.name} 최근 3개월 종가"))  # QChart 제목은 HTML을 해석한다
+        self.chart.setTitle(html.escape(f"{quote.name} 최근 {self._chart_label()} 종가"))  # QChart 제목은 HTML을 해석한다
 
     def _show_portfolio(self, view: _PortfolioView) -> None:
         summary = view.summary
