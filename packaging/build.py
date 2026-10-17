@@ -54,6 +54,7 @@ def main() -> int:
         "--exclude-module", "tkinter",
         "--exclude-module", "matplotlib",
         "--exclude-module", "pytest",
+        "--exclude-module", "PIL",    # 아이콘을 만들 때만 쓰는 빌드 도구라 묶음에 넣지 않는다
         str(ROOT / "packaging" / "run_app.py"),
     ]
     print(" ".join(command))

@@ -55,8 +55,12 @@ def self_check(report: str) -> int:
 
 
 def _use_own_taskbar_icon() -> None:
-    """소스로 실행할 때 Windows 작업 표시줄에 python 아이콘 대신 앱 아이콘이 보이게 앱 ID를 따로 둔다."""
-    if sys.platform != "win32":
+    """소스로 실행할 때 Windows 작업 표시줄에 python 아이콘 대신 앱 아이콘이 보이게 앱 ID를 따로 둔다.
+
+    실행 파일은 exe 자체가 정체성·아이콘을 가지므로 건드리지 않는다 — 설정하면 이전 버전을 작업 표시줄에
+    고정해 둔 사용자에게 고정 버튼과 실행 중인 창이 따로 보인다(Mock_QA I1).
+    """
+    if sys.platform != "win32" or getattr(sys, "frozen", False):
         return
     try:
         import ctypes
