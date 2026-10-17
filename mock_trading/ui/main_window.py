@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, QSize, QStandardPaths, Qt, QTime, QTimer
+from PySide6.QtCore import QDateTime, QEvent, QModelIndex, QObject, QSize, QStandardPaths, QStringListModel, Qt, QTime, QTimer
 from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QComboBox,
+    QCompleter,
     QFileDialog,
     QDoubleSpinBox,
     QSpinBox,
@@ -48,8 +49,9 @@ from ..domain import (
     krw,
 )
 from ..history import AssetPoint, DailyCloseCache, load_asset_history
-from ..market_data import PricePoint
+from ..market_data import PricePoint, is_valid_symbol
 from ..export import write_trades_csv
+from .. import symbols
 from ..market_rank import Market, MarketRanking, RankBy, Ranking
 from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
@@ -199,6 +201,26 @@ class FitLabel(QLabel):
         painter.drawText(self.contentsRect(), int(self.alignment()), self.shown_text(font))
 
 
+class _ImeSearchFilter(QObject):
+    """한글은 조합 중인 글자가 text()에 아직 없어 "삼성"을 치는 동안 "삼"으로만 찾게 된다.
+    입력기 이벤트에서 조합 중인 글자까지 붙여 바로 찾는다."""
+
+    def __init__(self, suggest, parent=None) -> None:
+        super().__init__(parent)
+        self._suggest = suggest
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt 이름 규칙)
+        if event.type() == QEvent.InputMethod:
+            text, cursor = watched.text(), watched.cursorPosition()
+            if watched.hasSelectedText():  # 선택한 글자는 새로 친 글자로 바뀐다
+                start = watched.selectionStart()
+                text, cursor = text[:start] + text[start + len(watched.selectedText()):], start
+            typing = event.commitString() + event.preeditString()
+            if typing:
+                self._suggest(text[:cursor] + typing + text[cursor:])
+        return False  # 입력 처리는 그대로
+
+
 class MainWindow(QMainWindow):
     def __init__(self, broker: Broker, watchlist: Watchlist | None = None) -> None:
         super().__init__()
@@ -246,7 +268,7 @@ class MainWindow(QMainWindow):
         content = QVBoxLayout()
         content.setSpacing(8)
         content.addWidget(self._build_pages(), 1)
-        self.status = _plain_label("종목 코드를 입력하세요. 예) 005930(삼성전자), AAPL")
+        self.status = _plain_label("종목 이름이나 코드를 입력하세요. 예) 삼성전자, 005930, 애플, AAPL")
         self.status.setObjectName("status")
         content.addWidget(self.status)
 
@@ -339,11 +361,20 @@ class MainWindow(QMainWindow):
 
         search = QHBoxLayout()
         self.symbol_input = QLineEdit()
-        self.symbol_input.setPlaceholderText("종목 코드 (005930, AAPL ...)")
-        self.symbol_input.setMaxLength(15)
-        self.symbol_input.returnPressed.connect(self.load_quote)
+        self.symbol_input.setPlaceholderText("종목 이름이나 코드 (삼성전자, 005930, 애플, AAPL)")
+        self.symbol_input.setMaxLength(40)  # 목록에서 고른 "이름  코드"가 들어갈 만큼
+        self.symbol_input.returnPressed.connect(self._enter_pressed)
+        # 이름 자동 완성: 직접 찾은 결과(초성·한글 별칭 포함)를 그대로 보여 준다(QCompleter 자체 필터는 끔)
+        self.symbol_matches = QStringListModel(self)
+        self.symbol_completer = QCompleter(self.symbol_matches, self)
+        self.symbol_completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self.symbol_input.setCompleter(self.symbol_completer)
+        self.symbol_completer.activated.connect(self._pick_symbol)
+        self.symbol_input.textEdited.connect(self._suggest_symbols)
+        self._ime_filter = _ImeSearchFilter(self._suggest_symbols, self)
+        self.symbol_input.installEventFilter(self._ime_filter)
         lookup = QPushButton("조회")
-        lookup.clicked.connect(self.load_quote)
+        lookup.clicked.connect(self._enter_pressed)  # clicked(checked)가 load_quote의 symbol로 들어가지 않게(Mock_QA NS6)
         search.addWidget(self.symbol_input, 1)
         search.addWidget(lookup)
         layout.addLayout(search)
@@ -683,10 +714,46 @@ class MainWindow(QMainWindow):
 
         self.worker.run(job, done, failed)
 
+    def _suggest_symbols(self, text: str) -> None:
+        matches = symbols.search(text)
+        self.symbol_matches.setStringList([m.label for m in matches])
+        if matches:
+            self.symbol_completer.complete()
+            # 첫 항목을 미리 고르지 않는다: 고르지 않고 Enter면 친 글자 그대로("AAP"가 AAPL로 바뀌지 않게)
+            self.symbol_completer.popup().setCurrentIndex(QModelIndex())
+        else:
+            self.symbol_completer.popup().hide()
+
+    def _enter_pressed(self) -> None:
+        # 목록이 떠 있을 때의 Enter는 입력창(returnPressed)과 목록 양쪽에 전달된다.
+        # 목록에서 항목을 골랐으면 목록 쪽(activated → _pick_symbol)만 조회하고(이중 조회 방지, Mock_QA NS1),
+        # 고르지 않았으면 목록을 닫고 친 글자 그대로 조회한다.
+        popup = self.symbol_completer.popup()
+        if popup.isVisible():
+            if popup.currentIndex().isValid():
+                return
+            popup.hide()
+        self.load_quote()
+
+    def _pick_symbol(self, label: str) -> None:
+        symbol = symbols.resolve(label)
+        self.symbol_input.setText(symbol)
+        self.load_quote(symbol)
+
     def load_quote(self, symbol: str | None = None) -> None:
-        symbol = symbol or self.symbol_input.text()
+        typed = symbol is None
+        symbol = symbols.resolve(symbol or self.symbol_input.text())  # 이름이면 코드로
         if not symbol.strip():
             return
+        if typed and not is_valid_symbol(symbol.strip().upper()):
+            # 코드가 될 수 없는 글자(이름 일부): 후보가 하나면 그 종목, 여럿이면 고르게 한다(Mock_QA NS2)
+            matches = symbols.search(symbol)
+            if len(matches) == 1:
+                symbol = matches[0].symbol
+            elif matches:
+                self.status.setText(f"'{symbol}'에 맞는 종목이 여러 개예요. 목록에서 골라 주세요.")
+                self._suggest_symbols(symbol)
+                return
         self.status.setText(f"{symbol} 시세를 불러오는 중...")
 
         def job() -> _QuoteView:
