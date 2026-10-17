@@ -14,7 +14,7 @@
 |---|---|---|
 | ![관심 종목](docs/watchlist.png) | ![자산 추이](docs/asset-history.png) | ![지정가 주문](docs/limit-order.png) |
 
-화면과 시연 GIF는 실제 시세와 임시 연습 계좌로 찍었습니다(`pip install -r requirements-build.txt` → `python packaging/make_media.py`, 실제 계좌 DB는 건드리지 않음).
+화면과 시연 GIF는 실제 시세와 임시 연습 계좌로 찍었습니다(`pip install --require-hashes -r requirements-build.lock` → `python packaging/make_media.py`, 실제 계좌 DB는 건드리지 않음).
 
 ## 주요 기능
 
@@ -42,7 +42,7 @@
 4. 서명하지 않은 실행 파일이라 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있습니다. 위 확인을 마친 이 파일에 한해 **추가 정보 → 실행**을 누르면 됩니다. SmartScreen이나 백신을 끌 필요는 없고, 끄지 마세요.
 5. 걱정되면 실행 파일 대신 아래 "실행 방법"처럼 소스에서 직접 실행할 수 있습니다.
 
-직접 만들기: 개발 환경을 준비한 뒤 `pip install -r requirements-build.txt` → `python packaging/build.py`
+직접 만들기: 새 가상환경에서 `pip install --require-hashes -r requirements-build.lock` → `python packaging/build.py`
 (결과: `dist/MockTrading/`, 배포용 `dist/MockTrading-windows.zip`과 `.sha256`). 릴리스용은 새 가상환경에서 만드는 것을 권장합니다.
 묶인 결과는 `MockTrading.exe --self-check report.txt`로 확인할 수 있습니다(화면 없이 DB·화면 구성·시세를 한 번씩 써 보고 결과를 파일에 씀).
 
@@ -53,7 +53,7 @@ Python 3.11 이상이 필요합니다.
 ```bash
 python -m venv .venv
 .venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock   # 간접 의존성까지 버전·해시 고정
 python -m mock_trading
 ```
 
@@ -66,6 +66,8 @@ python -m pytest
 ```
 
 시세는 가짜 provider로 대신하므로 네트워크 없이 돌아갑니다. PR과 `develop`·`main`에 올라올 때마다 GitHub Actions가 Windows에서 Python 3.11·3.14로 같은 테스트를 돌립니다.
+
+의존성: 사람이 고치는 파일은 `requirements.txt`(앱)·`requirements-build.txt`(빌드 도구)이고, 설치는 간접 의존성까지 정확한 버전과 SHA-256으로 고정한 `*.lock`으로 합니다(`--require-hashes`라 받은 파일이 다르면 설치가 멈춤). 직접 의존성을 바꾸면 `python packaging/lock.py`(uv 필요)로 lock을 다시 만듭니다.
 
 ## 구조
 

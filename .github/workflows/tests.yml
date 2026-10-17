@@ -19,12 +19,20 @@ concurrency:
 
 jobs:
   pytest:
+    # 이름은 브랜치 보호의 필수 검사("pytest (3.11)", "pytest (3.14)")와 같아야 한다
+    name: pytest (${{ matrix.python-version }})
     runs-on: windows-2025   # 이미지 버전 고정(windows-latest는 바뀔 수 있음)
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.14"]
+        include:
+          # 간접 의존성까지 해시로 고정한 lock으로 설치한다(packaging/lock.py). 3.14는 릴리스 빌드와 같은 lock
+          # (앱 + 빌드 도구, 아이콘 테스트용 pillow 포함)이라 CI가 배포물과 같은 버전을 검사한다.
+          - python-version: "3.11"
+            lock: requirements-py311.lock
+          - python-version: "3.14"
+            lock: requirements-build.lock
     env:
       QT_QPA_PLATFORM: offscreen   # 화면 없이 Qt 위젯 테스트
       PYTHONIOENCODING: utf-8
@@ -37,9 +45,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.txt
-      - run: python -m pip install -r requirements.txt
-      # 아이콘(.ico) 테스트용. 한 버전에서만 받는다(requirements-build의 PyInstaller까지는 필요 없음).
-      - if: matrix.python-version == '3.14'
-        run: python -m pip install pillow==12.3.0
+          cache-dependency-path: ${{ matrix.lock }}
+      # --require-hashes: 받은 파일이 lock의 SHA-256과 다르면 설치를 멈춘다(바꿔치기된 패키지 차단)
+      - run: python -m pip install --require-hashes -r ${{ matrix.lock }}
       - run: python -m pytest -q -rs   # -rs: 건너뛴 테스트와 이유를 로그에 남긴다
