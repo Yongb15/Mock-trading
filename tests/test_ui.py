@@ -718,3 +718,139 @@ def test_unpriced_mark_survives_the_narrowest_elide(app):
         assert "시세 없음" in shown or shown.endswith("…")
     label.resize(label.fontMetrics().horizontalAdvance(UNPRICED_MARK) + 30, 20)
     assert label.shown_text().endswith(UNPRICED_MARK)
+
+
+def _history_points():
+    from datetime import date, timedelta
+    from decimal import Decimal
+
+    from mock_trading.history import AssetPoint
+
+    start = date(2026, 10, 1)
+    return [AssetPoint(start + timedelta(days=i), Decimal(9_000_000), Decimal(1_000_000 + 100_000 * i), Decimal(10_000_000))
+            for i in range(4)]
+
+
+def test_history_compare_mode_draws_account_and_benchmarks(window, app):
+    """시장과 비교: 내 계좌·코스피200·S&P500을 한 축(%)에 그리고, 기준선(0%)은 범례에서 뺀다."""
+    from decimal import Decimal
+
+    from mock_trading.history import BenchmarkSeries
+
+    points = _history_points()
+    benchmarks = [BenchmarkSeries("069500.KS", "코스피200", [(p.day, Decimal(i)) for i, p in enumerate(points)]),
+                  BenchmarkSeries("SPY", "S&P500", [(p.day, Decimal(-i)) for i, p in enumerate(points)])]
+    queued = []
+    window.reader.run = lambda *a, **k: queued.append(a)  # 탭을 열 때의 실제 조회가 테스트 값을 덮지 않게
+    window.show()  # 범례 표시 여부는 화면에 올라간 뒤에 정해진다
+    window.tabs.setCurrentWidget(window.history_tab)
+    queued.clear()
+    window._show_asset_history(points, benchmarks)
+    app.processEvents()
+    assert [s.name() for s in window.history_chart.series()] == ["기초 자금", "총자산"]  # 기본은 금액
+    compare = next(b for b in window.history_mode_group.buttons() if b.property("value") == "compare")
+    compare.click()
+    assert queued == []  # 보기만 바꾸고 다시 조회하지 않는다
+    app.processEvents()
+    assert [s.name() for s in window.history_chart.series()] == ["0%", "내 계좌", "코스피200", "S&P500"]
+    visible = [m.label() for m in window.history_chart.legend().markers() if m.isVisible()]
+    assert visible == ["내 계좌", "코스피200", "S&P500"]
+    assert window.history_chart.axes(Qt.Vertical)[0].titleText() == "%"
+    text = window.history_label.text()
+    assert "내 계좌 +3.00%" in text and "코스피200 +3.00%" in text and "S&P500 -3.00%" in text
+
+
+def test_history_compare_without_benchmarks_says_so(window, app):
+    points = _history_points()
+    window._show_asset_history(points, [])
+    next(b for b in window.history_mode_group.buttons() if b.property("value") == "compare").click()
+    assert [s.name() for s in window.history_chart.series()] == ["0%", "내 계좌"]
+    assert "시장 지수를 받지 못했어요" in window.history_label.text()
+
+
+def test_switching_history_view_replaces_the_chart(window, app):
+    """금액 ↔ 수익률 전환 때 축을 떼고 붙이면 이전 눈금이 화면에 남아 겹쳐서, 차트를 새로 만들어 끼운다."""
+    window.reader.run = lambda *a, **k: None
+    window._show_asset_history(_history_points(), [])
+    before = window.history_chart
+    next(b for b in window.history_mode_group.buttons() if b.property("value") == "compare").click()
+    assert window.history_chart is not before and window.history_view.chart() is window.history_chart
+    assert len(window.history_chart.axes()) == 2
+
+
+def test_replaced_history_charts_are_freed(window, app):
+    """BM1: 바꿔 낀 이전 차트는 지워진다(지우지 않으면 갱신·전환마다 메모리가 쌓인다)."""
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    window.reader.run = lambda *a, **k: None
+    old_charts = []
+    for _ in range(5):
+        old_charts.append(window.history_chart)
+        window._show_asset_history(_history_points(), [])
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not any(shiboken6.isValid(chart) for chart in old_charts)
+    assert shiboken6.isValid(window.history_chart)
+def _stats_for(trades):
+    from datetime import datetime
+    from decimal import Decimal
+
+    from mock_trading.domain import Currency
+    from mock_trading.stats import trade_stats
+    from mock_trading.storage import Repository
+
+    repo = Repository()
+    repo.reset_account(Decimal(10_000_000))
+    for day, symbol, name, side, qty, price in trades:
+        repo.add_trade(symbol=symbol, name=name, side=side, quantity=qty, price=Decimal(price), currency=Currency.KRW,
+                       fx_rate=Decimal(1), amount_krw=Decimal(price * qty), fee_krw=Decimal(100),
+                       executed_at=datetime.fromisoformat(day))
+    return trade_stats(repo.trades())
+
+
+def test_trade_stats_panel_shows_results(window, app):
+    from mock_trading.domain import Side
+
+    stats = _stats_for([
+        ("2026-10-01", "A", "알파", Side.BUY, 10, 1000), ("2026-10-03", "A", "알파", Side.SELL, 10, 1200),
+        ("2026-10-01", "B", "베타", Side.BUY, 10, 1000), ("2026-10-11", "B", "베타", Side.SELL, 10, 900),
+    ])
+    window._show_stats(stats)
+    texts = {key: label.text() for key, label in window.stats_labels.items()}
+    assert texts == {"profit": "+600원", "win_rate": "50.0%  (1/2)", "avg_win": "+1,800원",
+                     "avg_loss": "-1,200원", "holding": "6.0일"}
+    assert "최고 알파 +1,800원" in window.stats_note.text() and "최저 베타 -1,200원" in window.stats_note.text()
+    assert window.stats_table.rowCount() == 2 and window.stats_table.item(0, 0).text() == "알파 (A)"
+
+
+def test_trade_stats_panel_without_sells_and_single_sell(window, app):
+    from mock_trading.domain import Side
+
+    window._show_stats(_stats_for([("2026-10-01", "A", "알파", Side.BUY, 1, 1000)]))
+    assert all(label.text() == "-" for label in window.stats_labels.values())
+    assert window.stats_table.isHidden()
+    window._show_stats(_stats_for([("2026-10-01", "A", "알파", Side.BUY, 1, 1000),
+                                   ("2026-10-02", "A", "알파", Side.SELL, 1, 1100)]))
+    note = window.stats_note.text()
+    assert "최저" not in note and note.count("알파") == 1 and "알파 -100원" in note  # 한 건이면 최고·최저 없이 한 번
+
+
+def test_trade_stats_with_long_names_keep_window_narrow(window, app):
+    """긴 종목명·큰 금액에도 거래 내역 화면이 창 최소 폭(≤1000)을 늘리지 않는다."""
+    from mock_trading.domain import Side
+    from mock_trading.ui.theme import apply_theme
+
+    font = app.font()
+    apply_theme(app)
+    try:
+        long = "아주 긴 이름 Holdings Corporation International " * 2
+        window._show_stats(_stats_for([
+            ("2026-10-01", "A", long, Side.BUY, 1000, 999_000), ("2026-10-02", "A", long, Side.SELL, 1000, 999_900),
+            ("2026-10-01", "B", long + "2", Side.BUY, 1000, 999_000), ("2026-10-02", "B", long + "2", Side.SELL, 1000, 1000),
+        ]))
+        window.tabs.setCurrentWidget(window.trades_page)
+        app.processEvents()
+        assert window.minimumSizeHint().width() <= 1000
+    finally:
+        app.setStyleSheet("")
+        app.setFont(font)

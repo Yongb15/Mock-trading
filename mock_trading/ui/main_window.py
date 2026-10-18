@@ -48,15 +48,16 @@ from ..domain import (
     TradingError,
     krw,
 )
-from ..history import AssetPoint, DailyCloseCache, load_asset_history
+from ..history import AssetPoint, BenchmarkSeries, DailyCloseCache, load_asset_history, load_benchmarks
 from ..market_data import PricePoint, is_valid_symbol
 from ..export import write_trades_csv
 from .. import allocation, symbols
+from ..stats import TradeStats, trade_stats
 from .allocation_bar import AllocationPanel
 from ..market_rank import Market, MarketRanking, RankBy, Ranking
 from ..watchlist import Watchlist, WatchRow
 from . import format as fmt
-from .theme import style_axes, style_chart
+from .theme import SERIES_COLORS, TEXT, style_axes, style_chart
 from .worker import Worker
 
 AUTO_REFRESH_MS = 60_000
@@ -117,6 +118,15 @@ def _warn(parent: QWidget, title: str, text: str) -> None:
     box = QMessageBox(QMessageBox.Warning, title, text, QMessageBox.Ok, parent)
     box.setTextFormat(Qt.PlainText)
     box.exec()
+
+
+def _reset_chart(chart: QChart) -> None:
+    """시리즈와 축을 모두 지운다. removeAxis는 차트에서 떼기만 해서, 지우지 않으면 보기를 바꿀 때
+    이전 축(눈금·제목)이 새 축과 겹쳐 그려진다."""
+    chart.removeAllSeries()
+    for axis in chart.axes():
+        chart.removeAxis(axis)
+        axis.deleteLater()
 
 
 def _item(text: str, *, align_right: bool = False, color: str = "") -> QTableWidgetItem:
@@ -250,6 +260,9 @@ class MainWindow(QMainWindow):
         self._rank_reload = False
         self._rank_market = Market.KR
         self._chart_period = DEFAULT_CHART_RANGE
+        self._history_mode = "amount"  # 자산 추이: 금액 / 시장과 비교(수익률)
+        self._history_points: list[AssetPoint] = []
+        self._benchmarks: list[BenchmarkSeries] = []
         self._chart_loading = False  # 기간 버튼으로 차트를 받는 중
         self._chart_reload = False   # 받는 중에 기간이 또 바뀜 → 끝나면 한 번 더
         self._rank_by = RankBy.GAINERS
@@ -359,6 +372,77 @@ class MainWindow(QMainWindow):
         holder.setLayout(buttons)
         grid.addWidget(holder, 0, 4, 2, 1)
         return box
+
+    def _build_stats(self) -> QWidget:
+        """매매 통계: 매도 한 건 한 건의 실현 손익(장부와 같은 이동평균 규칙)으로 연습 결과를 돌아본다."""
+        box = QGroupBox("매매 통계")
+        layout = QVBoxLayout(box)
+        grid = QGridLayout()
+        self.stats_labels: dict[str, QLabel] = {}
+        items = [("profit", "실현 손익"), ("win_rate", "승률"), ("avg_win", "평균 이익"),
+                 ("avg_loss", "평균 손실"), ("holding", "평균 보유")]
+        for column, (key, title) in enumerate(items):
+            caption = QLabel(title)
+            caption.setObjectName("caption")
+            value = FitLabel("-", min_width=90)
+            value.setObjectName("bigNumber")
+            grid.addWidget(caption, 0, column)
+            grid.addWidget(value, 1, column)
+            self.stats_labels[key] = value
+        row = list(self.stats_labels.values())
+        for label in row:
+            label.peers = row
+        layout.addLayout(grid)
+        self.stats_note = _plain_label("매도한 거래가 생기면 결과를 보여 드려요.")
+        self.stats_note.setObjectName("caption")
+        self.stats_note.setWordWrap(True)  # 긴 종목명이 들어가도 창 최소 폭을 늘리지 않게
+        layout.addWidget(self.stats_note)
+        self.stats_table = self._table(["종목", "매도 횟수", "실현 손익"], fit=(0,))
+        layout.addWidget(self.stats_table)
+        return box
+
+    def _show_stats(self, stats: TradeStats) -> None:
+        def put(key: str, text: str, color: str = "") -> None:
+            self.stats_labels[key].setText(text)
+            self.stats_labels[key].setStyleSheet(f"color: {color};" if color else "")
+
+        if not stats.sells:
+            for key in self.stats_labels:
+                put(key, "-")
+            self.stats_note.setText("매도한 거래가 생기면 결과를 보여 드려요.")
+            self.stats_table.setRowCount(0)
+            self.stats_table.hide()
+            return
+        put("profit", fmt.signed_won(stats.total_profit), fmt.color_for(stats.total_profit))
+        put("win_rate", f"{stats.win_rate:.1f}%  ({len(stats.wins)}/{stats.sells})")
+        put("avg_win", fmt.signed_won(stats.average_win) if stats.average_win is not None else "-",
+            fmt.color_for(stats.average_win))
+        put("avg_loss", fmt.signed_won(stats.average_loss) if stats.average_loss is not None else "-",
+            fmt.color_for(stats.average_loss))
+        put("holding", f"{stats.average_holding_days}일")
+        def describe(item) -> str:
+            return f"{item.name} {fmt.signed_won(item.profit_krw)} ({fmt.percent(item.return_rate)})"
+
+        best, worst = stats.best, stats.worst
+        results = f"최고 {describe(best)}  ·  최저 {describe(worst)}" if stats.sells > 1 else describe(best)
+        self.stats_note.setText(
+            f"매도 {stats.sells}회  ·  {results}\n보유 기간은 평균 취득일(수량 가중)부터, 손익은 수수료·세금을 뺀 값입니다."
+        )
+        self.stats_table.setRowCount(len(stats.by_symbol))
+        for row, result in enumerate(stats.by_symbol):
+            values = [
+                _item(f"{result.name} ({result.symbol})"),
+                _item(f"{result.sells:,}", align_right=True),
+                _item(fmt.signed_won(result.profit_krw), align_right=True, color=fmt.color_for(result.profit_krw)),
+            ]
+            for column, item in enumerate(values):
+                self.stats_table.setItem(row, column, item)
+        self._fit_columns(self.stats_table)
+        # 표 높이는 행 수에 맞춘다(최대 4줄, 넘으면 스크롤) — 한두 줄일 때 빈 칸이 크게 남지 않게
+        shown_rows = min(len(stats.by_symbol), 4)
+        header = self.stats_table.horizontalHeader().sizeHint().height()
+        self.stats_table.setFixedHeight(header + self.stats_table.verticalHeader().defaultSectionSize() * shown_rows + 4)
+        self.stats_table.show()
 
     def _build_quote_panel(self) -> QWidget:
         panel = QWidget()
@@ -634,6 +718,7 @@ class MainWindow(QMainWindow):
         trades_page = self.trades_page = QWidget()
         trades_layout = QVBoxLayout(trades_page)
         trades_layout.setContentsMargins(0, 0, 0, 0)
+        trades_layout.addWidget(self._build_stats())
         trades_layout.addWidget(self.trades_table, 1)
         export = QPushButton("CSV로 내보내기")
         export.clicked.connect(self.export_trades)
@@ -645,11 +730,27 @@ class MainWindow(QMainWindow):
         history_layout = QVBoxLayout(history_tab)
         history_layout.setContentsMargins(0, 0, 0, 0)
         self.history_label = _plain_label("-")
-        history_layout.addWidget(self.history_label)
+        history_top = QHBoxLayout()
+        history_top.addWidget(self.history_label, 1)
+        # 금액(원)과 수익률(%)은 단위가 달라 한 차트에 축 두 개로 그리지 않고, 보기를 바꾼다
+        self.history_mode_group = QButtonGroup(self)
+        self.history_mode_group.setExclusive(True)
+        for mode, label in (("amount", "금액"), ("compare", "시장과 비교")):
+            button = QPushButton(label)
+            button.setObjectName("chipSmall")
+            button.setCheckable(True)
+            button.setChecked(mode == self._history_mode)
+            button.setProperty("value", mode)
+            button.setAccessibleName(f"자산 추이 보기: {label}")
+            button.setMinimumWidth(button.fontMetrics().horizontalAdvance(label) + 24)
+            self.history_mode_group.addButton(button)
+            history_top.addWidget(button)
+        self.history_mode_group.buttonClicked.connect(self._on_history_mode)
+        history_layout.addLayout(history_top)
         self.history_chart = QChart()
         style_chart(self.history_chart)
         self.history_chart.setTitle("날짜별 총자산")
-        history_view = QChartView(self.history_chart)
+        history_view = self.history_view = QChartView(self.history_chart)
         history_view.setFocusPolicy(Qt.NoFocus)
         history_view.setRenderHint(QPainter.Antialiasing)
         history_layout.addWidget(history_view, 1)
@@ -982,15 +1083,21 @@ class MainWindow(QMainWindow):
 
         generation = self._view_generation
 
-        def job() -> list[AssetPoint]:
-            return load_asset_history(self.broker.repo, self.broker.provider, date.today(), self._history_cache)
+        def job() -> tuple[list[AssetPoint], list[BenchmarkSeries]]:
+            today = date.today()
+            points = load_asset_history(self.broker.repo, self.broker.provider, today, self._history_cache)
+            benchmarks = (
+                load_benchmarks(self.broker.provider, points[0].day, today, self._history_cache) if points else []
+            )
+            return points, benchmarks
 
-        def done(points: list[AssetPoint]) -> None:
+        def done(result: tuple[list[AssetPoint], list[BenchmarkSeries]]) -> None:
+            points, benchmarks = result
             self._history_loading = False
             if generation != self._view_generation:
                 self._load_visible_tab()  # 초기화 전 계좌의 결과 → 버리고 새 계좌로 다시
                 return
-            self._show_asset_history(points)  # 받은 결과는 먼저 보여 주고
+            self._show_asset_history(points, benchmarks)  # 받은 결과는 먼저 보여 주고
             if self._history_reload:          # 그 사이 들어온 요청이 있었으면 한 번 더
                 self._history_reload = False
                 self.load_asset_history()
@@ -1002,14 +1109,105 @@ class MainWindow(QMainWindow):
 
         self.reader.run(job, done, failed)
 
-    def _show_asset_history(self, points: list[AssetPoint]) -> None:
-        chart = self.history_chart
-        chart.removeAllSeries()
-        for axis in chart.axes():
-            chart.removeAxis(axis)
+    def _on_history_mode(self, button: QPushButton) -> None:
+        self._history_mode = button.property("value")
+        self._draw_history()  # 이미 받은 값으로 다시 그린다(조회 없음)
+
+    def _show_asset_history(self, points: list[AssetPoint], benchmarks: list[BenchmarkSeries] | None = None) -> None:
+        self._history_points, self._benchmarks = points, benchmarks or []
+        self._draw_history()
+
+    def _clear_history_chart(self) -> None:
+        """차트를 새로 만들어 끼운다. 축을 떼고 다시 붙이면(금액 ↔ 수익률) 떼어 낸 축의 눈금·격자가
+        화면에 남아 새 축과 겹쳐 그려지는 일이 있어서, 이전 차트를 통째로 버린다."""
+        old = self.history_chart
+        chart = QChart()
+        style_chart(chart)
+        self.history_view.setChart(chart)
+        self.history_chart = chart
+        # setChart는 이전 차트의 소유권을 놓기만 하고 지우지 않는다 → 직접 지우지 않으면 갱신(60초)·전환마다
+        # 시리즈·축이 붙은 차트가 하나씩 쌓인다(Mock_QA·Mock_Sequrity BM1)
+        old.deleteLater()
+
+    def _draw_history(self) -> None:
+        self._clear_history_chart()
+        points = self._history_points
         if not points:
             self.history_label.setText("-")
+            self.history_label.setStyleSheet("")
             return
+        if self._history_mode == "compare":
+            self._draw_history_compare(points, self._benchmarks)
+        else:
+            self._draw_history_amount(points)
+
+    def _draw_history_compare(self, points: list[AssetPoint], benchmarks: list[BenchmarkSeries]) -> None:
+        """계좌를 연 날을 0%로 내 계좌와 지수 ETF의 수익률을 한 축(%)에 그린다."""
+        chart = self.history_chart
+        chart.setTitle("시장과 수익률 비교 (계좌를 연 날 = 0%)")
+        lines = [("내 계좌", [(p.day, p.return_rate) for p in points], QColor(TEXT), 3)]
+        for index, bench in enumerate(benchmarks):
+            # 범주 색 2·3번(주황·청록): 1번 파랑은 이 앱에서 '하락' 색이라 내 계좌·지수에 쓰지 않는다
+            lines.append((bench.name, bench.returns, QColor(SERIES_COLORS[1 + index]), 2))
+        values = [0.0]
+        all_series = []
+        for name, data, color, width in lines:
+            series = QLineSeries()
+            series.setName(name)
+            pen = QPen(color)
+            pen.setWidth(width)
+            series.setPen(pen)
+            if len(data) < 2:
+                series.setPointsVisible(True)
+            for day, rate in data:
+                series.append(QDateTime(day, QTime(0, 0)).toMSecsSinceEpoch(), float(rate))
+                values.append(float(rate))
+            all_series.append(series)
+        zero = QLineSeries()
+        zero.setName("0%")
+        zero_pen = QPen(QColor("#adb5bd"))
+        zero_pen.setStyle(Qt.DashLine)
+        zero.setPen(zero_pen)
+        for day in (points[0].day, points[-1].day):
+            zero.append(QDateTime(day, QTime(0, 0)).toMSecsSinceEpoch(), 0.0)
+        for series in [zero, *all_series]:
+            chart.addSeries(series)
+        chart.legend().markers(zero)[0].setVisible(False)  # 기준선은 범례에서 뺀다
+
+        x_axis = self._history_x_axis(points)
+        y_axis = QValueAxis()
+        y_axis.setLabelFormat("%.1f")
+        y_axis.setTitleText("%")
+        padding = (max(values) - min(values)) * 0.1 or 1
+        y_axis.setRange(min(values) - padding, max(values) + padding)
+        y_axis.applyNiceNumbers()  # 눈금을 0·5·10처럼 읽기 쉬운 값으로(0%가 눈금에 오게)
+        chart.addAxis(x_axis, Qt.AlignBottom)
+        chart.addAxis(y_axis, Qt.AlignLeft)
+        for series in [zero, *all_series]:
+            series.attachAxis(x_axis)
+            series.attachAxis(y_axis)
+        style_axes(chart)
+
+        parts = [f"내 계좌 {fmt.percent(points[-1].return_rate)}"]
+        parts += [f"{b.name} {fmt.percent(b.returns[-1][1])}" for b in benchmarks if b.returns]
+        if benchmarks:
+            note = "  (지수는 ETF 가격 기준, S&P500은 원화 환산)"
+        else:
+            note = "  · 시장 지수를 받지 못했어요. 잠시 후 다시 시도해요."
+        self.history_label.setText(f"{points[0].day:%Y-%m-%d}부터  |  " + "  ·  ".join(parts) + note)
+        self.history_label.setStyleSheet("")
+
+    def _history_x_axis(self, points: list[AssetPoint]) -> QDateTimeAxis:
+        x_axis = QDateTimeAxis()
+        span = (points[-1].day - points[0].day).days
+        x_axis.setFormat("yy/MM/dd" if span > 365 else "MM/dd")  # 1년이 넘으면 연도까지
+        first = QDateTime(points[0].day, QTime(0, 0))
+        x_axis.setRange(first.addDays(-1), QDateTime(points[-1].day, QTime(0, 0)).addDays(1))
+        return x_axis
+
+    def _draw_history_amount(self, points: list[AssetPoint]) -> None:
+        chart = self.history_chart
+        chart.setTitle("날짜별 총자산")
 
         total = QLineSeries()
         total.setName("총자산")
@@ -1032,11 +1230,7 @@ class MainWindow(QMainWindow):
         chart.addSeries(principal)
         chart.addSeries(total)
 
-        x_axis = QDateTimeAxis()
-        span = (points[-1].day - points[0].day).days
-        x_axis.setFormat("yy/MM/dd" if span > 365 else "MM/dd")  # 1년이 넘으면 연도까지
-        first = QDateTime(points[0].day, QTime(0, 0))
-        x_axis.setRange(first.addDays(-1), QDateTime(points[-1].day, QTime(0, 0)).addDays(1))
+        x_axis = self._history_x_axis(points)
         y_axis = QValueAxis()
         # 변동이 1만원 남짓인 평평한 구간에서는 눈금이 같은 숫자로 찍히지 않게 소수 한 자리까지
         # (라벨 형식 문자열에는 한글을 쓸 수 없어 단위는 축 제목으로)
@@ -1458,9 +1652,7 @@ class MainWindow(QMainWindow):
 
     def _draw_chart(self, quote: Quote, history: list[PricePoint], period: str | None) -> None:
         """period: 이 이력의 기간. 제목·가로축을 그 기간으로 그린다(지금 고른 기간이 아니라)."""
-        self.chart.removeAllSeries()
-        for axis in self.chart.axes():
-            self.chart.removeAxis(axis)
+        _reset_chart(self.chart)
         if not history:
             self.chart.setTitle("")  # 이전 종목 제목이 빈 차트 위에 남지 않게
             return
@@ -1495,6 +1687,7 @@ class MainWindow(QMainWindow):
         self.summary_labels["return"].setStyleSheet(f"color: {fmt.color_for(rate)};")
         self.summary_labels["realized"].setText(fmt.signed_won(summary.realized_profit))
         self.allocation_panel.set_slices(allocation.slices(view.positions, summary.cash))
+        self._show_stats(trade_stats(view.trades))
 
         self.holdings_table.setRowCount(len(view.positions))
         for row, position in enumerate(sorted(view.positions, key=lambda p: p.value_krw, reverse=True)):

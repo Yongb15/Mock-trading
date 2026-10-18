@@ -197,3 +197,56 @@ def load_asset_history(
         closes=closes,
         usd_krw=usd_krw,
     )
+
+
+# 시장과 비교: 지수 자체(^KS11 등)는 종목 코드 규칙 밖이라, 지수를 따라가는 ETF의 종가로 수익률을 잰다.
+# (코드, 이름, 통화). 달러 ETF는 원화로 환산해 원화 계좌와 같은 기준으로 비교한다. 배당은 빠진 가격 수익률이다.
+BENCHMARKS = (
+    ("069500.KS", "코스피200", Currency.KRW),
+    ("SPY", "S&P500", Currency.USD),
+)
+
+
+@dataclass(frozen=True)
+class BenchmarkSeries:
+    symbol: str
+    name: str
+    returns: list[tuple[date, Decimal]]  # (날짜, 첫날 대비 수익률 %)
+
+
+def benchmark_returns(
+    days: list[date], closes: DailyCloses, usd_krw: dict[date, Decimal]
+) -> list[BenchmarkSeries]:
+    """days 첫날을 0%로 한 지수 ETF 수익률. 첫날 값(직전 거래일 포함)을 모르면 그 지수는 빼고 돌려준다."""
+    if not days:
+        return []
+    fx = _forward_filled(usd_krw, days)
+    out = []
+    for symbol, name, currency in BENCHMARKS:
+        prices = _forward_filled(closes.get(symbol, {}), days)
+        values: dict[date, Decimal] = {}
+        for day, price in prices.items():
+            rate = Decimal(1) if currency is Currency.KRW else fx.get(day)
+            if rate is not None:
+                values[day] = price * rate
+        base = values.get(days[0])
+        if base is None:
+            continue  # 기준일 값이 없으면 비교가 틀어지므로 그리지 않는다
+        out.append(BenchmarkSeries(symbol, name, [(d, (values[d] / base - 1) * 100) for d in days if d in values]))
+    return out
+
+
+def load_benchmarks(
+    provider, start: date, today: date, cache: DailyCloseCache, now: datetime | None = None
+) -> list[BenchmarkSeries]:
+    """자산 추이와 같은 기간(start~today)의 지수 ETF 수익률. 종가는 자산 추이와 같은 캐시로 받는다."""
+    if getattr(provider, "get_daily_closes", None) is None or today < start:
+        return []
+    start = max(start, today - timedelta(days=MAX_HISTORY_DAYS))
+    days = [start + timedelta(days=n) for n in range((today - start).days + 1)]
+    symbols = [symbol for symbol, _, _ in BENCHMARKS]
+    closes, usd_krw = cache.get(
+        provider, symbols, start - timedelta(days=DOWNLOAD_BUFFER_DAYS),
+        include_fx=any(c is Currency.USD for _, _, c in BENCHMARKS), today=today, now=now or datetime.now(),
+    )
+    return benchmark_returns(days, closes, usd_krw)
