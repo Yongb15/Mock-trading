@@ -776,3 +776,18 @@ def test_switching_history_view_replaces_the_chart(window, app):
     next(b for b in window.history_mode_group.buttons() if b.property("value") == "compare").click()
     assert window.history_chart is not before and window.history_view.chart() is window.history_chart
     assert len(window.history_chart.axes()) == 2
+
+
+def test_replaced_history_charts_are_freed(window, app):
+    """BM1: 바꿔 낀 이전 차트는 지워진다(지우지 않으면 갱신·전환마다 메모리가 쌓인다)."""
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    window.reader.run = lambda *a, **k: None
+    old_charts = []
+    for _ in range(5):
+        old_charts.append(window.history_chart)
+        window._show_asset_history(_history_points(), [])
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not any(shiboken6.isValid(chart) for chart in old_charts)
+    assert shiboken6.isValid(window.history_chart)

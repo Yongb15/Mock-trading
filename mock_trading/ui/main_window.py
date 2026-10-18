@@ -1050,9 +1050,11 @@ class MainWindow(QMainWindow):
         old = self.history_chart
         chart = QChart()
         style_chart(chart)
-        self.history_view.setChart(chart)  # 이전 차트는 뷰가 지운다
+        self.history_view.setChart(chart)
         self.history_chart = chart
-        del old
+        # setChart는 이전 차트의 소유권을 놓기만 하고 지우지 않는다 → 직접 지우지 않으면 갱신(60초)·전환마다
+        # 시리즈·축이 붙은 차트가 하나씩 쌓인다(Mock_QA·Mock_Sequrity BM1)
+        old.deleteLater()
 
     def _draw_history(self) -> None:
         self._clear_history_chart()
