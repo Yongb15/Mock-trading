@@ -70,6 +70,7 @@ def seed_account(repo: Repository, provider: YFinanceProvider, broker: Broker) -
         ("AAPL", Side.BUY, 8, days[0], Currency.USD),
         ("000660.KS", Side.BUY, 3, days[3], Currency.KRW),
         ("005930.KS", Side.SELL, 5, days[min(9, len(days) - 1)], Currency.KRW),  # 연휴가 끼어 거래일이 적어도
+        ("AAPL", Side.SELL, 3, days[-1], Currency.USD),  # 매매 통계 예시용 두 번째 매도(최근 거래일 종가)
     ]
     names = {symbol: provider.get_quote(symbol).name for symbol in closes}  # 앱이 보여 주는 이름과 같게
     for symbol, side, qty, day, currency in plan:
@@ -145,6 +146,9 @@ def main() -> int:
         next(b for b in window.history_mode_group.buttons() if b.property("value") == "compare").click()  # 시장과 비교
         settle(app, 2)
         shot("market-compare.png", 2200)
+        window.tabs.setCurrentWidget(window.trades_page)  # 거래 내역 + 매매 통계
+        settle(app, 2)
+        shot("trade-stats.png", 2000)
         window.tabs.setCurrentWidget(window.account_page)
         settle(app, 4)
         shot(None, 1800)

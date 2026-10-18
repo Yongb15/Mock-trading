@@ -52,6 +52,7 @@ from ..history import AssetPoint, BenchmarkSeries, DailyCloseCache, load_asset_h
 from ..market_data import PricePoint, is_valid_symbol
 from ..export import write_trades_csv
 from .. import allocation, symbols
+from ..stats import TradeStats, trade_stats
 from .allocation_bar import AllocationPanel
 from ..market_rank import Market, MarketRanking, RankBy, Ranking
 from ..watchlist import Watchlist, WatchRow
@@ -372,6 +373,77 @@ class MainWindow(QMainWindow):
         grid.addWidget(holder, 0, 4, 2, 1)
         return box
 
+    def _build_stats(self) -> QWidget:
+        """매매 통계: 매도 한 건 한 건의 실현 손익(장부와 같은 이동평균 규칙)으로 연습 결과를 돌아본다."""
+        box = QGroupBox("매매 통계")
+        layout = QVBoxLayout(box)
+        grid = QGridLayout()
+        self.stats_labels: dict[str, QLabel] = {}
+        items = [("profit", "실현 손익"), ("win_rate", "승률"), ("avg_win", "평균 이익"),
+                 ("avg_loss", "평균 손실"), ("holding", "평균 보유")]
+        for column, (key, title) in enumerate(items):
+            caption = QLabel(title)
+            caption.setObjectName("caption")
+            value = FitLabel("-", min_width=90)
+            value.setObjectName("bigNumber")
+            grid.addWidget(caption, 0, column)
+            grid.addWidget(value, 1, column)
+            self.stats_labels[key] = value
+        row = list(self.stats_labels.values())
+        for label in row:
+            label.peers = row
+        layout.addLayout(grid)
+        self.stats_note = _plain_label("매도한 거래가 생기면 결과를 보여 드려요.")
+        self.stats_note.setObjectName("caption")
+        self.stats_note.setWordWrap(True)  # 긴 종목명이 들어가도 창 최소 폭을 늘리지 않게
+        layout.addWidget(self.stats_note)
+        self.stats_table = self._table(["종목", "매도 횟수", "실현 손익"], fit=(0,))
+        layout.addWidget(self.stats_table)
+        return box
+
+    def _show_stats(self, stats: TradeStats) -> None:
+        def put(key: str, text: str, color: str = "") -> None:
+            self.stats_labels[key].setText(text)
+            self.stats_labels[key].setStyleSheet(f"color: {color};" if color else "")
+
+        if not stats.sells:
+            for key in self.stats_labels:
+                put(key, "-")
+            self.stats_note.setText("매도한 거래가 생기면 결과를 보여 드려요.")
+            self.stats_table.setRowCount(0)
+            self.stats_table.hide()
+            return
+        put("profit", fmt.signed_won(stats.total_profit), fmt.color_for(stats.total_profit))
+        put("win_rate", f"{stats.win_rate:.1f}%  ({len(stats.wins)}/{stats.sells})")
+        put("avg_win", fmt.signed_won(stats.average_win) if stats.average_win is not None else "-",
+            fmt.color_for(stats.average_win))
+        put("avg_loss", fmt.signed_won(stats.average_loss) if stats.average_loss is not None else "-",
+            fmt.color_for(stats.average_loss))
+        put("holding", f"{stats.average_holding_days}일")
+        def describe(item) -> str:
+            return f"{item.name} {fmt.signed_won(item.profit_krw)} ({fmt.percent(item.return_rate)})"
+
+        best, worst = stats.best, stats.worst
+        results = f"최고 {describe(best)}  ·  최저 {describe(worst)}" if stats.sells > 1 else describe(best)
+        self.stats_note.setText(
+            f"매도 {stats.sells}회  ·  {results}\n보유 기간은 처음 산 날부터, 손익은 수수료·세금을 뺀 값입니다."
+        )
+        self.stats_table.setRowCount(len(stats.by_symbol))
+        for row, result in enumerate(stats.by_symbol):
+            values = [
+                _item(f"{result.name} ({result.symbol})"),
+                _item(f"{result.sells:,}", align_right=True),
+                _item(fmt.signed_won(result.profit_krw), align_right=True, color=fmt.color_for(result.profit_krw)),
+            ]
+            for column, item in enumerate(values):
+                self.stats_table.setItem(row, column, item)
+        self._fit_columns(self.stats_table)
+        # 표 높이는 행 수에 맞춘다(최대 4줄, 넘으면 스크롤) — 한두 줄일 때 빈 칸이 크게 남지 않게
+        shown_rows = min(len(stats.by_symbol), 4)
+        header = self.stats_table.horizontalHeader().sizeHint().height()
+        self.stats_table.setFixedHeight(header + self.stats_table.verticalHeader().defaultSectionSize() * shown_rows + 4)
+        self.stats_table.show()
+
     def _build_quote_panel(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("card")  # 흰 카드(theme.py)
@@ -646,6 +718,7 @@ class MainWindow(QMainWindow):
         trades_page = self.trades_page = QWidget()
         trades_layout = QVBoxLayout(trades_page)
         trades_layout.setContentsMargins(0, 0, 0, 0)
+        trades_layout.addWidget(self._build_stats())
         trades_layout.addWidget(self.trades_table, 1)
         export = QPushButton("CSV로 내보내기")
         export.clicked.connect(self.export_trades)
@@ -1614,6 +1687,7 @@ class MainWindow(QMainWindow):
         self.summary_labels["return"].setStyleSheet(f"color: {fmt.color_for(rate)};")
         self.summary_labels["realized"].setText(fmt.signed_won(summary.realized_profit))
         self.allocation_panel.set_slices(allocation.slices(view.positions, summary.cash))
+        self._show_stats(trade_stats(view.trades))
 
         self.holdings_table.setRowCount(len(view.positions))
         for row, position in enumerate(sorted(view.positions, key=lambda p: p.value_krw, reverse=True)):

@@ -791,3 +791,66 @@ def test_replaced_history_charts_are_freed(window, app):
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     assert not any(shiboken6.isValid(chart) for chart in old_charts)
     assert shiboken6.isValid(window.history_chart)
+def _stats_for(trades):
+    from datetime import datetime
+    from decimal import Decimal
+
+    from mock_trading.domain import Currency
+    from mock_trading.stats import trade_stats
+    from mock_trading.storage import Repository
+
+    repo = Repository()
+    repo.reset_account(Decimal(10_000_000))
+    for day, symbol, name, side, qty, price in trades:
+        repo.add_trade(symbol=symbol, name=name, side=side, quantity=qty, price=Decimal(price), currency=Currency.KRW,
+                       fx_rate=Decimal(1), amount_krw=Decimal(price * qty), fee_krw=Decimal(100),
+                       executed_at=datetime.fromisoformat(day))
+    return trade_stats(repo.trades())
+
+
+def test_trade_stats_panel_shows_results(window, app):
+    from mock_trading.domain import Side
+
+    stats = _stats_for([
+        ("2026-10-01", "A", "알파", Side.BUY, 10, 1000), ("2026-10-03", "A", "알파", Side.SELL, 10, 1200),
+        ("2026-10-01", "B", "베타", Side.BUY, 10, 1000), ("2026-10-11", "B", "베타", Side.SELL, 10, 900),
+    ])
+    window._show_stats(stats)
+    texts = {key: label.text() for key, label in window.stats_labels.items()}
+    assert texts == {"profit": "+600원", "win_rate": "50.0%  (1/2)", "avg_win": "+1,800원",
+                     "avg_loss": "-1,200원", "holding": "6.0일"}
+    assert "최고 알파 +1,800원" in window.stats_note.text() and "최저 베타 -1,200원" in window.stats_note.text()
+    assert window.stats_table.rowCount() == 2 and window.stats_table.item(0, 0).text() == "알파 (A)"
+
+
+def test_trade_stats_panel_without_sells_and_single_sell(window, app):
+    from mock_trading.domain import Side
+
+    window._show_stats(_stats_for([("2026-10-01", "A", "알파", Side.BUY, 1, 1000)]))
+    assert all(label.text() == "-" for label in window.stats_labels.values())
+    assert window.stats_table.isHidden()
+    window._show_stats(_stats_for([("2026-10-01", "A", "알파", Side.BUY, 1, 1000),
+                                   ("2026-10-02", "A", "알파", Side.SELL, 1, 1100)]))
+    note = window.stats_note.text()
+    assert "최저" not in note and note.count("알파") == 1 and "알파 -100원" in note  # 한 건이면 최고·최저 없이 한 번
+
+
+def test_trade_stats_with_long_names_keep_window_narrow(window, app):
+    """긴 종목명·큰 금액에도 거래 내역 화면이 창 최소 폭(≤1000)을 늘리지 않는다."""
+    from mock_trading.domain import Side
+    from mock_trading.ui.theme import apply_theme
+
+    font = app.font()
+    apply_theme(app)
+    try:
+        long = "아주 긴 이름 Holdings Corporation International " * 2
+        window._show_stats(_stats_for([
+            ("2026-10-01", "A", long, Side.BUY, 1000, 999_000), ("2026-10-02", "A", long, Side.SELL, 1000, 999_900),
+            ("2026-10-01", "B", long + "2", Side.BUY, 1000, 999_000), ("2026-10-02", "B", long + "2", Side.SELL, 1000, 1000),
+        ]))
+        window.tabs.setCurrentWidget(window.trades_page)
+        app.processEvents()
+        assert window.minimumSizeHint().width() <= 1000
+    finally:
+        app.setStyleSheet("")
+        app.setFont(font)
