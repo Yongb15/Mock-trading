@@ -718,3 +718,76 @@ def test_unpriced_mark_survives_the_narrowest_elide(app):
         assert "시세 없음" in shown or shown.endswith("…")
     label.resize(label.fontMetrics().horizontalAdvance(UNPRICED_MARK) + 30, 20)
     assert label.shown_text().endswith(UNPRICED_MARK)
+
+
+def _history_points():
+    from datetime import date, timedelta
+    from decimal import Decimal
+
+    from mock_trading.history import AssetPoint
+
+    start = date(2026, 10, 1)
+    return [AssetPoint(start + timedelta(days=i), Decimal(9_000_000), Decimal(1_000_000 + 100_000 * i), Decimal(10_000_000))
+            for i in range(4)]
+
+
+def test_history_compare_mode_draws_account_and_benchmarks(window, app):
+    """시장과 비교: 내 계좌·코스피200·S&P500을 한 축(%)에 그리고, 기준선(0%)은 범례에서 뺀다."""
+    from decimal import Decimal
+
+    from mock_trading.history import BenchmarkSeries
+
+    points = _history_points()
+    benchmarks = [BenchmarkSeries("069500.KS", "코스피200", [(p.day, Decimal(i)) for i, p in enumerate(points)]),
+                  BenchmarkSeries("SPY", "S&P500", [(p.day, Decimal(-i)) for i, p in enumerate(points)])]
+    queued = []
+    window.reader.run = lambda *a, **k: queued.append(a)  # 탭을 열 때의 실제 조회가 테스트 값을 덮지 않게
+    window.show()  # 범례 표시 여부는 화면에 올라간 뒤에 정해진다
+    window.tabs.setCurrentWidget(window.history_tab)
+    queued.clear()
+    window._show_asset_history(points, benchmarks)
+    app.processEvents()
+    assert [s.name() for s in window.history_chart.series()] == ["기초 자금", "총자산"]  # 기본은 금액
+    compare = next(b for b in window.history_mode_group.buttons() if b.property("value") == "compare")
+    compare.click()
+    assert queued == []  # 보기만 바꾸고 다시 조회하지 않는다
+    app.processEvents()
+    assert [s.name() for s in window.history_chart.series()] == ["0%", "내 계좌", "코스피200", "S&P500"]
+    visible = [m.label() for m in window.history_chart.legend().markers() if m.isVisible()]
+    assert visible == ["내 계좌", "코스피200", "S&P500"]
+    assert window.history_chart.axes(Qt.Vertical)[0].titleText() == "%"
+    text = window.history_label.text()
+    assert "내 계좌 +3.00%" in text and "코스피200 +3.00%" in text and "S&P500 -3.00%" in text
+
+
+def test_history_compare_without_benchmarks_says_so(window, app):
+    points = _history_points()
+    window._show_asset_history(points, [])
+    next(b for b in window.history_mode_group.buttons() if b.property("value") == "compare").click()
+    assert [s.name() for s in window.history_chart.series()] == ["0%", "내 계좌"]
+    assert "시장 지수를 받지 못했어요" in window.history_label.text()
+
+
+def test_switching_history_view_replaces_the_chart(window, app):
+    """금액 ↔ 수익률 전환 때 축을 떼고 붙이면 이전 눈금이 화면에 남아 겹쳐서, 차트를 새로 만들어 끼운다."""
+    window.reader.run = lambda *a, **k: None
+    window._show_asset_history(_history_points(), [])
+    before = window.history_chart
+    next(b for b in window.history_mode_group.buttons() if b.property("value") == "compare").click()
+    assert window.history_chart is not before and window.history_view.chart() is window.history_chart
+    assert len(window.history_chart.axes()) == 2
+
+
+def test_replaced_history_charts_are_freed(window, app):
+    """BM1: 바꿔 낀 이전 차트는 지워진다(지우지 않으면 갱신·전환마다 메모리가 쌓인다)."""
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    window.reader.run = lambda *a, **k: None
+    old_charts = []
+    for _ in range(5):
+        old_charts.append(window.history_chart)
+        window._show_asset_history(_history_points(), [])
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not any(shiboken6.isValid(chart) for chart in old_charts)
+    assert shiboken6.isValid(window.history_chart)

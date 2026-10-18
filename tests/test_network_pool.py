@@ -66,7 +66,7 @@ def test_slow_watchlist_does_not_delay_orders(window, app):
 def test_result_started_before_reset_is_discarded(window, app):
     """초기화 전에 시작한 자산 추이 결과가 초기화 뒤에 도착하면 그리지 않고 새 계좌로 다시 불러온다."""
     shown = []
-    window._show_asset_history = lambda points: shown.append(window._view_generation)
+    window._show_asset_history = lambda points, benchmarks=None: shown.append(window._view_generation)
     release = threading.Event()
     calls = []
 
