@@ -395,9 +395,9 @@ class MainWindow(QMainWindow):
         layout.addLayout(grid)
         self.stats_note = _plain_label("매도한 거래가 생기면 결과를 보여 드려요.")
         self.stats_note.setObjectName("caption")
+        self.stats_note.setWordWrap(True)  # 긴 종목명이 들어가도 창 최소 폭을 늘리지 않게
         layout.addWidget(self.stats_note)
         self.stats_table = self._table(["종목", "매도 횟수", "실현 손익"], fit=(0,))
-        self.stats_table.setMaximumHeight(44 * 4 + 40)  # 종목별은 몇 줄만 보이고 나머지는 스크롤
         layout.addWidget(self.stats_table)
         return box
 
@@ -411,6 +411,7 @@ class MainWindow(QMainWindow):
                 put(key, "-")
             self.stats_note.setText("매도한 거래가 생기면 결과를 보여 드려요.")
             self.stats_table.setRowCount(0)
+            self.stats_table.hide()
             return
         put("profit", fmt.signed_won(stats.total_profit), fmt.color_for(stats.total_profit))
         put("win_rate", f"{stats.win_rate:.1f}%  ({len(stats.wins)}/{stats.sells})")
@@ -419,11 +420,13 @@ class MainWindow(QMainWindow):
         put("avg_loss", fmt.signed_won(stats.average_loss) if stats.average_loss is not None else "-",
             fmt.color_for(stats.average_loss))
         put("holding", f"{stats.average_holding_days}일")
+        def describe(item) -> str:
+            return f"{item.name} {fmt.signed_won(item.profit_krw)} ({fmt.percent(item.return_rate)})"
+
         best, worst = stats.best, stats.worst
+        results = f"최고 {describe(best)}  ·  최저 {describe(worst)}" if stats.sells > 1 else describe(best)
         self.stats_note.setText(
-            f"매도 {stats.sells}회  ·  최고 {best.name} {fmt.signed_won(best.profit_krw)} ({fmt.percent(best.return_rate)})"
-            f"  ·  최저 {worst.name} {fmt.signed_won(worst.profit_krw)} ({fmt.percent(worst.return_rate)})"
-            "  ·  보유 기간은 처음 산 날부터, 손익은 수수료·세금 포함"
+            f"매도 {stats.sells}회  ·  {results}\n보유 기간은 처음 산 날부터, 손익은 수수료·세금을 뺀 값입니다."
         )
         self.stats_table.setRowCount(len(stats.by_symbol))
         for row, result in enumerate(stats.by_symbol):
@@ -435,6 +438,11 @@ class MainWindow(QMainWindow):
             for column, item in enumerate(values):
                 self.stats_table.setItem(row, column, item)
         self._fit_columns(self.stats_table)
+        # 표 높이는 행 수에 맞춘다(최대 4줄, 넘으면 스크롤) — 한두 줄일 때 빈 칸이 크게 남지 않게
+        shown_rows = min(len(stats.by_symbol), 4)
+        header = self.stats_table.horizontalHeader().sizeHint().height()
+        self.stats_table.setFixedHeight(header + self.stats_table.verticalHeader().defaultSectionSize() * shown_rows + 4)
+        self.stats_table.show()
 
     def _build_quote_panel(self) -> QWidget:
         panel = QWidget()
