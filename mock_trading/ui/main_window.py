@@ -426,7 +426,7 @@ class MainWindow(QMainWindow):
         best, worst = stats.best, stats.worst
         results = f"최고 {describe(best)}  ·  최저 {describe(worst)}" if stats.sells > 1 else describe(best)
         self.stats_note.setText(
-            f"매도 {stats.sells}회  ·  {results}\n보유 기간은 처음 산 날부터, 손익은 수수료·세금을 뺀 값입니다."
+            f"매도 {stats.sells}회  ·  {results}\n보유 기간은 평균 취득일(수량 가중)부터, 손익은 수수료·세금을 뺀 값입니다."
         )
         self.stats_table.setRowCount(len(stats.by_symbol))
         for row, result in enumerate(stats.by_symbol):

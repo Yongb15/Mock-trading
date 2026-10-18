@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from .domain import Side, Trade, krw
 
@@ -19,7 +19,7 @@ class ClosedTrade:
     name: str
     profit_krw: Decimal      # 매도 대금 - 수수료·세금 - 줄어든 원가(이동평균)
     cost_krw: Decimal        # 이번 매도로 줄어든 원가
-    holding_days: int        # 이 보유를 시작한 날(0주 → 매수)부터 매도한 날까지
+    holding_days: int        # 평균 취득일(수량 가중, 이동평균 원가와 같은 규칙)부터 매도한 날까지
 
     @property
     def return_rate(self) -> Decimal:
@@ -89,16 +89,19 @@ def trade_stats(trades: list[Trade]) -> TradeStats:
     """장부 순서(id)대로 훑어 매도마다 실현 손익과 보유 기간을 낸다."""
     quantity: dict[str, int] = {}
     cost: dict[str, Decimal] = {}
-    opened: dict[str, object] = {}  # 보유를 시작한 날
+    # 평균 취득일(서수 날짜, 수량 가중). 이동평균 원가처럼 매수마다 섞고, 일부 매도에는 그대로, 0주가 되면 버린다.
+    # '처음 산 날'로 세면 물타기·분할 매수에서 보유 기간이 크게 부풀려진다(Mock_QA TS1).
+    avg_day: dict[str, Decimal] = {}
     closed: list[ClosedTrade] = []
     names: dict[str, str] = {}
     for trade in sorted(trades, key=lambda t: t.id):
         held = quantity.get(trade.symbol, 0)
         held_cost = cost.get(trade.symbol, Decimal(0))
         names[trade.symbol] = trade.name
+        day = Decimal(trade.executed_at.date().toordinal())
         if trade.side is Side.BUY:
-            if held == 0:
-                opened[trade.symbol] = trade.executed_at.date()
+            previous = avg_day.get(trade.symbol, day) if held else day
+            avg_day[trade.symbol] = (previous * held + day * trade.quantity) / (held + trade.quantity)
             quantity[trade.symbol] = held + trade.quantity
             cost[trade.symbol] = held_cost + trade.amount_krw + trade.fee_krw
             continue
@@ -107,11 +110,11 @@ def trade_stats(trades: list[Trade]) -> TradeStats:
         remaining = held - trade.quantity
         new_cost = krw(held_cost * remaining / held)
         reduced = held_cost - new_cost
-        start = opened.get(trade.symbol, trade.executed_at.date())
+        held_days = (day - avg_day.get(trade.symbol, day)).quantize(Decimal(1), rounding=ROUND_HALF_UP)
         closed.append(ClosedTrade(
             trade.id, trade.symbol, trade.name,
             trade.amount_krw - trade.fee_krw - reduced, reduced,
-            max(0, (trade.executed_at.date() - start).days),
+            max(0, int(held_days)),
         ))
         quantity[trade.symbol], cost[trade.symbol] = remaining, new_cost
 

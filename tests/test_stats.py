@@ -50,7 +50,7 @@ def test_win_rate_averages_best_worst():
 
 
 def test_holding_period_restarts_after_selling_everything():
-    """전부 판 뒤 다시 사면 보유 기간을 새로 센다. 일부만 팔면 처음 산 날부터."""
+    """전부 판 뒤 다시 사면 보유 기간을 새로 센다. 일부만 팔면 평균 취득일은 그대로."""
     repo = repo_with([
         ("2026-10-01", "A", B, 10, 1000), ("2026-10-04", "A", S, 5, 1000),
         ("2026-10-05", "A", S, 5, 1000), ("2026-10-10", "A", B, 2, 1000), ("2026-10-12", "A", S, 2, 1000),
@@ -73,3 +73,12 @@ def test_no_sells_yet():
     stats = trade_stats(repo_with([("2026-10-01", "A", B, 1, 1000)]).trades())
     assert stats.sells == 0 and stats.win_rate is None and stats.average_win is None
     assert stats.best is None and stats.by_symbol == [] and stats.total_profit == 0
+
+
+def test_holding_period_uses_quantity_weighted_average_date():
+    """Mock_QA TS1: 31일 전 10주 + 1일 전 90주를 사서 팔면 31일이 아니라 수량 가중 평균 취득일부터 4일."""
+    repo = repo_with([
+        ("2026-09-01", "A", B, 10, 1000), ("2026-10-01", "A", B, 90, 1000), ("2026-10-02", "A", S, 50, 1000),
+        ("2026-10-12", "A", S, 50, 1000),  # 일부 매도 뒤에도 평균 취득일은 그대로 → 14일
+    ])
+    assert [c.holding_days for c in trade_stats(repo.trades()).closed] == [4, 14]
