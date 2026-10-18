@@ -142,6 +142,9 @@ def main() -> int:
         window.tabs.setCurrentWidget(window.history_tab)
         settle(app, 10)
         shot("asset-history.png", 2200)
+        next(b for b in window.history_mode_group.buttons() if b.property("value") == "compare").click()  # 시장과 비교
+        settle(app, 2)
+        shot("market-compare.png", 2200)
         window.tabs.setCurrentWidget(window.account_page)
         settle(app, 4)
         shot(None, 1800)
