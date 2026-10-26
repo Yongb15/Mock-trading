@@ -22,7 +22,7 @@ def test_csv_opens_in_excel_with_korean(tmp_path):
     with (tmp_path / "out.csv").open(encoding="utf-8-sig", newline="") as f:
         rows = list(csv.reader(f))
     assert rows[0] == HEADER
-    assert rows[1] == ["2026-10-16 09:30:00", "매수", "삼성전자", "005930.KS", "3", "70000", "KRW", "1", "210000", "31"]
+    assert rows[1] == ["2026-10-16 09:30:00", "매수", "삼성전자", "005930.KS", "3", "70000", "KRW", "1", "210000", "31", ""]
     assert rows[2][1] == "매도"
 
 
@@ -105,3 +105,17 @@ def test_invisible_format_char_before_formula_is_neutralized():
     for value in ["\u200b=1+1", "\ufeff+1", "\u200b \u00a0@SUM(A1)"]:
         assert _safe_text(value) == "'" + value
     assert _safe_text("Apple\u200bInc") == "Apple\u200bInc"
+
+
+def test_notes_column_and_formula_in_notes_is_neutralized(tmp_path):
+    """매매 메모도 사람이 쓴 글자라 =, +, - 등으로 시작하면 '를 붙인다. 메모 없는 거래는 빈칸."""
+    from dataclasses import replace
+
+    first, second = trade(), replace(trade(side=Side.SELL), id=2)
+    notes = {first.id: "=HYPERLINK(\"http://x\")", second.id: "실적 발표 전 일부 정리"}
+    rows = trade_rows([first, second], notes)
+    assert rows[0][-1] == "'" + notes[first.id] and rows[1][-1] == "실적 발표 전 일부 정리"
+    assert trade_rows([first])[0][-1] == ""
+    path = tmp_path / "n.csv"
+    write_trades_csv([second], path, notes)
+    assert "실적 발표 전 일부 정리" in path.read_text(encoding="utf-8-sig")
