@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QComboBox,
+    QDialog,
     QCompleter,
     QFileDialog,
     QDoubleSpinBox,
@@ -375,6 +376,20 @@ class MainWindow(QMainWindow):
         grid.addWidget(holder, 0, 4, 2, 1)
         return box
 
+    def _ask_note(self, name: str, current: str) -> tuple[str, bool]:
+        """메모 입력 창. 외부에서 온 종목명은 창 제목(평문)에만 넣고, 안내 라벨도 평문으로 고정한다
+        (QInputDialog 라벨은 기본이 AutoText라 HTML처럼 보이면 서식으로 그린다). 입력은 200자까지."""
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(f"매매 메모 — {name}")
+        dialog.setLabelText(f"메모 ({MAX_NOTE_LENGTH}자까지, 비우면 지워요)")
+        dialog.setTextValue(current)
+        for label in dialog.findChildren(QLabel):
+            label.setTextFormat(Qt.PlainText)
+        for line in dialog.findChildren(QLineEdit):
+            line.setMaxLength(MAX_NOTE_LENGTH)  # 붙여 넣은 긴 글이 조용히 잘려 저장되지 않게(Mock_QA TN2)
+        accepted = dialog.exec() == QDialog.Accepted
+        return dialog.textValue(), accepted
+
     def _edit_note(self, row: int) -> None:
         """거래 내역에서 메모를 남기거나 고친다(비우면 지움). 장부의 거래 기록 자체는 바뀌지 않는다."""
         first = self.trades_table.item(row, 0)
@@ -383,10 +398,7 @@ class MainWindow(QMainWindow):
         trade_id = int(first.data(Qt.UserRole))
         name = self.trades_table.item(row, 2).text()
         current = self.trades_table.item(row, 8).text() if self.trades_table.item(row, 8) else ""
-        # 안내 라벨은 HTML처럼 보이면 서식으로 그리므로(AutoText) 외부에서 온 종목명은 창 제목(평문)에만 넣는다
-        text, ok = QInputDialog.getText(
-            self, f"매매 메모 — {name}", f"메모 ({MAX_NOTE_LENGTH}자까지, 비우면 지워요)", QLineEdit.Normal, current
-        )
+        text, ok = self._ask_note(name, current)
         if not ok:
             return
 

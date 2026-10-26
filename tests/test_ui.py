@@ -929,12 +929,12 @@ def test_edit_note_from_trade_history(window, app, monkeypatch):
     _buy_with_note(window, app, "", monkeypatch)
     [trade] = window.broker.repo.trades()
     for typed, expected in (("손절 기준 -5%", {trade.id: "손절 기준 -5%"}), ("", {})):
-        monkeypatch.setattr(mw.QInputDialog, "getText", staticmethod(lambda *a, **k: (typed, True)))
+        monkeypatch.setattr(window, "_ask_note", lambda name, current: (typed, True))
         window._edit_note(0)
         window.worker.wait(3000)
         app.processEvents()
         assert window.broker.repo.notes() == expected
-    monkeypatch.setattr(mw.QInputDialog, "getText", staticmethod(lambda *a, **k: ("취소됨", False)))
+    monkeypatch.setattr(window, "_ask_note", lambda name, current: ("취소됨", False))
     window._edit_note(0)
     window.worker.wait(3000)
     assert window.broker.repo.notes() == {}
@@ -956,14 +956,23 @@ def test_trade_amounts_are_not_cut_off_by_long_notes(window, app, monkeypatch):
     assert table.horizontalHeader().sectionResizeMode(8) == QHeaderView.Stretch
 
 
-def test_note_dialog_keeps_external_name_out_of_the_label(window, app, monkeypatch):
-    """수정 창의 안내 라벨은 HTML로 해석될 수 있어, 외부에서 온 종목명은 창 제목에만 넣는다."""
+def test_note_dialog_is_plain_text_and_limited(window, app, monkeypatch):
+    """수정 창: 외부 종목명은 제목에만, 안내 라벨은 평문(HTML 해석 안 함), 입력은 200자까지(Mock_Sequrity·Mock_QA TN2)."""
     import mock_trading.ui.main_window as mw
+    from PySide6.QtWidgets import QLabel, QLineEdit
 
-    _buy_with_note(window, app, "", monkeypatch)
-    seen = []
-    monkeypatch.setattr(mw.QInputDialog, "getText",
-                        staticmethod(lambda parent, title, label, *a, **k: (seen.append((title, label)), ("", False))[1]))
-    window._edit_note(0)
-    [(title, label)] = seen
-    assert "005930" in title and "005930" not in label and "Samsung" not in label
+    seen = {}
+
+    def fake_exec(dialog):
+        seen["title"] = dialog.windowTitle()
+        seen["formats"] = [label.textFormat() for label in dialog.findChildren(QLabel)]
+        seen["labels"] = [label.text() for label in dialog.findChildren(QLabel)]
+        seen["max"] = [line.maxLength() for line in dialog.findChildren(QLineEdit)]
+        return mw.QDialog.Rejected
+
+    monkeypatch.setattr(mw.QInputDialog, "exec", fake_exec)
+    text, ok = window._ask_note('<img src="file:///C:/x.png"><b>Evil</b> (AAPL)', "기존 메모")
+    assert not ok and text == "기존 메모"
+    assert "Evil" in seen["title"] and not any("Evil" in t for t in seen["labels"])
+    assert seen["formats"] and all(f == mw.Qt.PlainText for f in seen["formats"])
+    assert seen["max"] and all(m == 200 for m in seen["max"])

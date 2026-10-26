@@ -271,7 +271,6 @@ class Repository:
         )
 
     @_locked
-    @_locked
     def set_note(self, trade_id: int, note: str) -> str:
         """거래의 메모를 남기거나 고친다. 빈 메모는 지운다. 정리한(clean_note) 메모를 돌려준다."""
         if isinstance(trade_id, bool) or not isinstance(trade_id, int):
@@ -296,6 +295,7 @@ class Repository:
         rows = self._conn.execute("SELECT trade_id, note FROM trade_notes").fetchall()
         return {row["trade_id"]: row["note"] for row in rows if isinstance(row["note"], str)}
 
+    @_locked
     def trades(self) -> list[Trade]:
         rows = self._conn.execute("SELECT * FROM trades ORDER BY id").fetchall()
         return [self._row_to_trade(row) for row in rows]
