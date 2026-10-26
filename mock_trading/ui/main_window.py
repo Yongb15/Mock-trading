@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 from datetime import date
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from ..broker import PRICE_SLIPPAGE_LIMIT, AccountSummary, Broker, OrderEvent
 from ..domain import (
+    MAX_NOTE_LENGTH,
     MAX_ORDER_QUANTITY,
     Currency,
     LimitOrder,
@@ -86,6 +87,7 @@ class _PortfolioView:
     summary: AccountSummary
     positions: list[Position]
     trades: list[Trade]
+    notes: dict[int, str] = field(default_factory=dict)  # 거래 번호 → 매매 메모
 
 
 def _plain_label(text: str) -> QLabel:
@@ -373,6 +375,26 @@ class MainWindow(QMainWindow):
         grid.addWidget(holder, 0, 4, 2, 1)
         return box
 
+    def _edit_note(self, row: int) -> None:
+        """거래 내역에서 메모를 남기거나 고친다(비우면 지움). 장부의 거래 기록 자체는 바뀌지 않는다."""
+        first = self.trades_table.item(row, 0)
+        if first is None or first.data(Qt.UserRole) is None:
+            return
+        trade_id = int(first.data(Qt.UserRole))
+        name = self.trades_table.item(row, 2).text()
+        current = self.trades_table.item(row, 8).text() if self.trades_table.item(row, 8) else ""
+        text, ok = QInputDialog.getText(
+            self, "매매 메모", f"{name}\n메모 ({MAX_NOTE_LENGTH}자까지, 비우면 지워요)", QLineEdit.Normal, current
+        )
+        if not ok:
+            return
+
+        def done(saved: str) -> None:
+            self.status.setText("메모를 저장했어요" if saved else "메모를 지웠어요")
+            self.load_portfolio()
+
+        self.worker.run(lambda: self.broker.repo.set_note(trade_id, text), done, self._show_error)
+
     def _build_stats(self) -> QWidget:
         """매매 통계: 매도 한 건 한 건의 실현 손익(장부와 같은 이동평균 규칙)으로 연습 결과를 돌아본다."""
         box = QGroupBox("매매 통계")
@@ -527,8 +549,14 @@ class MainWindow(QMainWindow):
         self.sell_button = QPushButton("매도")
         self.sell_button.setStyleSheet(_order_button_style(fmt.DOWN_COLOR))
         self.sell_button.clicked.connect(lambda: self.place_order(Side.SELL))
-        form.addWidget(self.buy_button, 4, 0, 1, 2)
-        form.addWidget(self.sell_button, 4, 2)
+        self.note_input = QLineEdit()
+        self.note_input.setMaxLength(MAX_NOTE_LENGTH)
+        self.note_input.setPlaceholderText("메모 (선택) — 이 거래를 하는 이유")
+        self.note_input.setAccessibleName("매매 메모")
+        form.addWidget(QLabel("메모"), 4, 0)
+        form.addWidget(self.note_input, 4, 1, 1, 2)
+        form.addWidget(self.buy_button, 5, 0, 1, 2)
+        form.addWidget(self.sell_button, 5, 2)
         layout.addWidget(order)
         layout.addStretch(1)
 
@@ -699,7 +727,11 @@ class MainWindow(QMainWindow):
         self.holdings_table = self._table(["종목", "코드", "수량", "평균 단가", "현재가", "평가 금액", "평가 손익", "수익률"])
         # 더블클릭과 Enter 모두로 연다
         self.holdings_table.itemActivated.connect(lambda item: self._open_holding(item.row(), item.column()))
-        self.trades_table = self._table(["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료"], fit=(0, 2))
+        self.trades_table = self._table(
+            ["시간", "구분", "종목", "수량", "체결가", "환율", "체결 금액", "수수료", "메모"],
+            fit=(0, 1, 2, 3, 4, 5, 6, 7),  # 금액이 잘리지 않게 메모 빼고 모두 내용 폭, 메모가 남는 폭을 쓴다
+        )
+        self.trades_table.itemActivated.connect(lambda item: self._edit_note(item.row()))  # 더블클릭·Enter
         self.watch_table = self._table(["종목", "코드", "현재가", "전일 대비"])
         self.watch_table.itemActivated.connect(lambda item: self._open_watch(item.row(), item.column()))
         QShortcut(QKeySequence.Delete, self.watch_table, self._remove_selected_watch, context=Qt.WidgetShortcut)
@@ -898,7 +930,8 @@ class MainWindow(QMainWindow):
 
         def job() -> _PortfolioView:
             positions = self.broker.positions()
-            return _PortfolioView(self.broker.summary(positions), positions, self.broker.repo.trades())
+            repo = self.broker.repo
+            return _PortfolioView(self.broker.summary(positions), positions, repo.trades(), repo.notes())
 
         def done(view: _PortfolioView) -> None:
             self._portfolio_loading = False
@@ -985,7 +1018,7 @@ class MainWindow(QMainWindow):
 
         def job() -> int:
             try:
-                return write_trades_csv(self.broker.repo.trades(), path)
+                return write_trades_csv(self.broker.repo.trades(), path, self.broker.repo.notes())
             except OSError:
                 raise TradingError("파일을 저장할 수 없습니다. 같은 파일이 엑셀 등에서 열려 있지 않은지, 저장 위치를 확인하세요.") from None
 
@@ -1368,6 +1401,11 @@ class MainWindow(QMainWindow):
 
     def _on_order_type_changed(self) -> None:
         self.limit_price.setEnabled(self._is_limit())
+        # 지정가는 나중에 체결되므로 메모는 체결 뒤 거래 내역에서 남긴다
+        self.note_input.setEnabled(not self._is_limit())
+        self.note_input.setPlaceholderText(
+            "지정가는 체결 뒤 거래 내역에서 메모를 남겨요" if self._is_limit() else "메모 (선택) — 이 거래를 하는 이유"
+        )
         self._update_estimate()
         self._set_order_enabled(True)
 
@@ -1557,14 +1595,32 @@ class MainWindow(QMainWindow):
         self._set_order_enabled(False)
         action = self.broker.buy if side is Side.BUY else self.broker.sell
         expected_price, expected_fx = quote.price, self.current.fx_rate
+        note = self.note_input.text()
 
-        def done(trade: Trade) -> None:
+        def job() -> tuple[Trade, str]:
+            trade = action(quote.symbol, quantity, expected_price=expected_price, expected_fx=expected_fx)
+            note_error = ""
+            if note.strip():
+                try:  # 체결은 이미 끝났다 → 메모 저장이 실패해도 주문 실패로 알리지 않는다
+                    self.broker.repo.set_note(trade.id, note)
+                except Exception as error:
+                    note_error = str(error) if isinstance(error, TradingError) else type(error).__name__
+            return trade, note_error
+
+        def done(result: tuple[Trade, str]) -> None:
+            trade, note_error = result
             self._order_pending = False
+            self.note_input.clear()
             self.status.setText(
                 f"{verb} 체결: {trade.name} {trade.quantity:,}주 @ {fmt.price(trade.price, trade.currency)}"
                 f" (수수료 {fmt.won(trade.fee_krw)})"
             )
             self.refresh_all()
+            if note_error:
+                # 상태줄은 곧 시세 갱신으로 덮이므로 따로 알린다. 주문 실패로 읽히지 않게 체결됐다고 먼저 말한다.
+                _warn(self, "메모 저장 실패",
+                      f"{verb}는 체결됐어요. 메모만 저장하지 못했어요({note_error}).\n"
+                      "거래 내역에서 그 거래를 더블클릭해 다시 남길 수 있어요.")
 
         def failed(message: str) -> None:
             self._order_pending = False
@@ -1572,9 +1628,7 @@ class MainWindow(QMainWindow):
             _warn(self, f"{verb} 실패", message)
             self.refresh_all()
 
-        self.worker.run(
-            lambda: action(quote.symbol, quantity, expected_price=expected_price, expected_fx=expected_fx), done, failed
-        )
+        self.worker.run(job, done, failed)
 
     def _estimate(self, side: Side) -> tuple[Decimal, Decimal]:
         """화면과 확인창에 보여줄 원화 금액과 수수료. 실제 체결과 같은 규칙(broker.fees)으로 계산한다."""
@@ -1720,7 +1774,11 @@ class MainWindow(QMainWindow):
                 _item("-" if trade.fx_rate == Decimal(1) else f"{trade.fx_rate:,.2f}", align_right=True),
                 _item(fmt.won(trade.amount_krw), align_right=True),
                 _item(fmt.won(trade.fee_krw), align_right=True),
+                _item(view.notes.get(trade.id, "")),
             ]
+            values[0].setData(Qt.UserRole, trade.id)  # 메모를 고칠 때 어느 거래인지
+            if note := view.notes.get(trade.id, ""):  # 남는 폭에서 줄어 보이므로 전체는 툴팁(HTML로 해석되지 않게)
+                values[8].setToolTip(f"<p style='white-space:pre-wrap'>{html.escape(note)}</p>")
             for column, item in enumerate(values):
                 self.trades_table.setItem(row, column, item)
         self._fit_columns(self.trades_table)
