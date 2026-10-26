@@ -17,6 +17,8 @@ KRW_UNIT = Decimal("1")
 USD_PRICE_UNIT = Decimal("0.0001")
 FX_UNIT = Decimal("0.01")
 MAX_NAME_LENGTH = 100
+# 매매 일지 메모 한 건의 최대 길이(한 줄)
+MAX_NOTE_LENGTH = 200
 
 # 원/달러 환율이 이 범위를 벗어나면 데이터 오류로 본다.
 USD_KRW_MIN = Decimal(500)
@@ -107,6 +109,15 @@ def clean_name(value: object, fallback: str) -> str:
         return fallback
     text = "".join(ch for ch in value if unicodedata.category(ch)[0] != "C").strip()
     return text[:MAX_NAME_LENGTH] or fallback
+
+
+def clean_note(value: object) -> str:
+    """사용자가 적은 매매 메모: 문자열만, 줄바꿈·제어문자 제거(한 줄), 앞뒤 공백 제거, 길이 제한."""
+    if not isinstance(value, str):
+        raise TradingError("메모는 글자여야 합니다.")
+    text = "".join(" " if ch in "\n\r\t" else ch for ch in value)
+    text = "".join(ch for ch in text if unicodedata.category(ch)[0] != "C").strip()
+    return text[:MAX_NOTE_LENGTH]
 
 
 @dataclass(frozen=True)

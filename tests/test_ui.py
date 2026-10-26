@@ -11,6 +11,7 @@ import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from mock_trading.broker import Broker  # noqa: E402
+from mock_trading.domain import Side, TradingError  # noqa: E402
 from mock_trading.storage import Repository  # noqa: E402
 from mock_trading.ui.main_window import MainWindow, _QuoteView  # noqa: E402
 
@@ -159,7 +160,7 @@ def test_time_and_name_columns_are_not_cut_off(window):
     """README 화면 확인 중 발견: 주문 시각·종목명이 '2026-10-16 ...'처럼 잘리지 않게 내용 길이에 맞춘다."""
     from PySide6.QtWidgets import QHeaderView
 
-    for table, columns in [(window.orders_table, (1, 3)), (window.trades_table, (0, 2))]:
+    for table, columns in [(window.orders_table, (1, 3)), (window.trades_table, (0, 1, 2, 3, 4, 5, 6, 7))]:
         header = table.horizontalHeader()
         for column in range(table.columnCount()):
             expected = QHeaderView.Interactive if column in columns else QHeaderView.Stretch
@@ -854,3 +855,124 @@ def test_trade_stats_with_long_names_keep_window_narrow(window, app):
     finally:
         app.setStyleSheet("")
         app.setFont(font)
+
+
+def _buy_with_note(window, app, note, monkeypatch):
+    import mock_trading.ui.main_window as mw
+
+    monkeypatch.setattr(mw, "_confirm", lambda *a, **k: True)
+    window.load_quote("005930")
+    window.worker.wait(3000)
+    app.processEvents()
+    window.quantity.setValue(1)
+    window.note_input.setText(note)
+    window.place_order(Side.BUY)
+    window.worker.wait(3000)
+    app.processEvents()
+    window.worker.wait(3000)
+    app.processEvents()
+
+
+def test_market_order_saves_note_and_shows_it(window, app, monkeypatch):
+    """시장가 체결 때 적은 메모가 그 거래에 저장되고, 거래 내역 메모 열에 보이고, 입력칸은 비워진다."""
+    _buy_with_note(window, app, "  실적 발표 기대\n두 줄  ", monkeypatch)
+    [trade] = window.broker.repo.trades()
+    assert window.broker.repo.notes() == {trade.id: "실적 발표 기대 두 줄"}
+    assert window.note_input.text() == ""
+    assert window.trades_table.item(0, 8).text() == "실적 발표 기대 두 줄"
+    from PySide6.QtGui import QTextDocument
+
+    doc = QTextDocument()
+    doc.setHtml(window.trades_table.item(0, 8).toolTip())
+    assert doc.toPlainText() == "실적 발표 기대 두 줄"
+
+
+def test_note_tooltip_does_not_render_html(window, app, monkeypatch):
+    """메모는 사용자가 쓴 글자 — 툴팁에서 태그로 해석하지 않는다."""
+    from PySide6.QtGui import QTextDocument
+
+    note = '<img src="file:///C:/x.png"><b>굵게</b>'
+    _buy_with_note(window, app, note, monkeypatch)
+    doc = QTextDocument()
+    doc.setHtml(window.trades_table.item(0, 8).toolTip())
+    assert doc.toPlainText() == note
+
+
+def test_note_failure_does_not_turn_a_fill_into_a_failure(window, app, monkeypatch):
+    """체결 뒤 메모 저장만 실패하면 '주문 실패' 경고가 아니라 체결 안내 + 메모 실패 안내."""
+    import mock_trading.ui.main_window as mw
+
+    warned = []
+    monkeypatch.setattr(mw, "_warn", lambda *a, **k: warned.append(a))
+
+    def broken(trade_id, note):
+        raise TradingError("디스크 문제")
+
+    monkeypatch.setattr(window.broker.repo, "set_note", broken)
+    _buy_with_note(window, app, "메모", monkeypatch)
+    assert len(window.broker.repo.trades()) == 1  # 체결은 그대로
+    [(_, title, text)] = warned
+    assert title == "메모 저장 실패" and "체결됐어요" in text and "디스크 문제" in text
+
+
+def test_limit_order_disables_note_input(window, app):
+    window.order_type.setCurrentIndex(1)
+    assert not window.note_input.isEnabled() and "거래 내역" in window.note_input.placeholderText()
+    window.order_type.setCurrentIndex(0)
+    assert window.note_input.isEnabled()
+
+
+def test_edit_note_from_trade_history(window, app, monkeypatch):
+    """거래 내역 행에서 메모를 고치고, 비우면 지운다."""
+    import mock_trading.ui.main_window as mw
+
+    _buy_with_note(window, app, "", monkeypatch)
+    [trade] = window.broker.repo.trades()
+    for typed, expected in (("손절 기준 -5%", {trade.id: "손절 기준 -5%"}), ("", {})):
+        monkeypatch.setattr(window, "_ask_note", lambda name, current: (typed, True))
+        window._edit_note(0)
+        window.worker.wait(3000)
+        app.processEvents()
+        assert window.broker.repo.notes() == expected
+    monkeypatch.setattr(window, "_ask_note", lambda name, current: ("취소됨", False))
+    window._edit_note(0)
+    window.worker.wait(3000)
+    assert window.broker.repo.notes() == {}
+
+
+def test_trade_amounts_are_not_cut_off_by_long_notes(window, app, monkeypatch):
+    """메모 열이 생겨도 체결가·금액·수수료 열은 내용 폭(잘리지 않음), 메모가 남는 폭을 쓴다."""
+    from PySide6.QtWidgets import QHeaderView
+
+    _buy_with_note(window, app, "아주 긴 메모 " * 15, monkeypatch)
+    table = window.trades_table
+    window.resize(1000, 760)
+    window.tabs.setCurrentWidget(window.trades_page)
+    window.show()
+    app.processEvents()
+    for column in (4, 6, 7):
+        item = table.item(0, column)
+        assert table.columnWidth(column) >= table.fontMetrics().horizontalAdvance(item.text())
+    assert table.horizontalHeader().sectionResizeMode(8) == QHeaderView.Stretch
+
+
+def test_note_dialog_is_plain_text_and_limited(window, app, monkeypatch):
+    """수정 창: 외부 종목명은 제목에만, 안내 라벨은 평문(HTML 해석 안 함), 입력은 200자까지(Mock_Sequrity·Mock_QA TN2)."""
+    import mock_trading.ui.main_window as mw
+    from PySide6.QtWidgets import QLabel, QLineEdit
+
+    seen = {}
+
+    def fake_exec(dialog):
+        seen["title"] = dialog.windowTitle()
+        seen["formats"] = [label.textFormat() for label in dialog.findChildren(QLabel)]
+        seen["labels"] = [label.text() for label in dialog.findChildren(QLabel)]
+        seen["max"] = [line.maxLength() for line in dialog.findChildren(QLineEdit)]
+        return mw.QDialog.Rejected
+
+    monkeypatch.setattr(mw.QInputDialog, "exec", fake_exec)
+    text, ok = window._ask_note('<img src="file:///C:/x.png"><b>Evil</b> (AAPL)', "기존 메모")
+    assert not ok and text == "기존 메모"
+    assert "Evil" in seen["title"] and not any("Evil" in t for t in seen["labels"])
+    assert seen["formats"] and all(f == mw.Qt.PlainText for f in seen["formats"])
+    assert seen["max"] and all(m == 200 for m in seen["max"])

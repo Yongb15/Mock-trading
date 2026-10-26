@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .domain import Side, Trade
 
-HEADER = ["체결 시각", "구분", "종목명", "코드", "수량", "체결가", "통화", "환율", "체결 금액(원)", "수수료(원)"]
+HEADER = ["체결 시각", "구분", "종목명", "코드", "수량", "체결가", "통화", "환율", "체결 금액(원)", "수수료(원)", "메모"]
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
@@ -26,7 +26,9 @@ def _safe_text(value: str) -> str:
     return value
 
 
-def trade_rows(trades: list[Trade]) -> list[list[str]]:
+def trade_rows(trades: list[Trade], notes: dict[int, str] | None = None) -> list[list[str]]:
+    """notes: 거래 번호 → 매매 메모. 메모도 사람이 쓴 글자라 수식으로 실행되지 않게 막는다."""
+    notes = notes or {}
     rows = []
     for t in trades:
         rows.append([
@@ -40,11 +42,12 @@ def trade_rows(trades: list[Trade]) -> list[list[str]]:
             str(t.fx_rate),
             str(t.amount_krw),
             str(t.fee_krw),
+            _safe_text(notes.get(t.id, "")),
         ])
     return rows
 
 
-def write_trades_csv(trades: list[Trade], path: Path | str) -> int:
+def write_trades_csv(trades: list[Trade], path: Path | str, notes: dict[int, str] | None = None) -> int:
     """거래 내역을 사용자가 고른 경로 그대로에 CSV로 쓴다. 쓴 거래 수를 돌려준다.
 
     확장자를 여기서 바꾸면 저장 대화상자가 확인한 것과 다른 파일을 확인 없이 덮어쓸 수 있다 →
@@ -54,5 +57,5 @@ def write_trades_csv(trades: list[Trade], path: Path | str) -> int:
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(HEADER)
-        writer.writerows(trade_rows(trades))
+        writer.writerows(trade_rows(trades, notes))
     return len(trades)

@@ -119,6 +119,7 @@ def main() -> int:
         settle(app, 6)
         shot(None)
         window.quantity.setValue(3)
+        window.note_input.setText("반도체 업황 회복 기대, 분할 매수 1차")  # 매매 일지
         settle(app, 0.5)
         shot(None, 900)
         window.place_order(Side.BUY)                                   # 시장가 매수

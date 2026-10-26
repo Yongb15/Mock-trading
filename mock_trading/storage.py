@@ -18,7 +18,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterator
 
-from .domain import Currency, Holding, LimitOrder, OrderStatus, Side, Trade, TradingError, krw, to_decimal
+from .domain import (
+    Currency, Holding, LimitOrder, OrderStatus, Side, Trade, TradingError, clean_note, krw, to_decimal,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account (
@@ -57,6 +59,13 @@ CREATE TABLE IF NOT EXISTS orders (
     fx_at_order  TEXT,
     armed        INTEGER NOT NULL DEFAULT 0 CHECK (armed IN (0, 1)),
     armed_at     TEXT
+);
+-- 매매 일지: 거래마다 남기는 메모. 거래 장부(trades)는 추가만 하므로 고칠 수 있는 메모는 따로 둔다.
+-- 계좌를 초기화하면 거래와 함께 지운다. 예전 DB에는 이 표가 없어서 열 때 새로 만든다(CREATE IF NOT EXISTS).
+CREATE TABLE IF NOT EXISTS trade_notes (
+    trade_id    INTEGER PRIMARY KEY REFERENCES trades(id),
+    note        TEXT    NOT NULL CHECK (length(note) BETWEEN 1 AND 200),
+    updated_at  TEXT    NOT NULL
 );
 -- 관심 종목은 계좌가 아니라 사용자 설정이라 계좌를 초기화해도 남는다.
 CREATE TABLE IF NOT EXISTS watchlist (
@@ -195,6 +204,7 @@ class Repository:
         """기초 자금을 새로 받고 거래 내역을 모두 지운다."""
         with self.transaction():
             self._conn.execute("DELETE FROM orders")
+            self._conn.execute("DELETE FROM trade_notes")
             self._conn.execute("DELETE FROM trades")
             self._conn.execute("DELETE FROM account")
             self._conn.execute(
@@ -259,6 +269,31 @@ class Repository:
             amount_krw=amount_krw,
             fee_krw=fee_krw,
         )
+
+    @_locked
+    def set_note(self, trade_id: int, note: str) -> str:
+        """거래의 메모를 남기거나 고친다. 빈 메모는 지운다. 정리한(clean_note) 메모를 돌려준다."""
+        if isinstance(trade_id, bool) or not isinstance(trade_id, int):
+            raise TradingError("거래 번호가 올바르지 않습니다.")
+        note = clean_note(note)
+        with self.transaction():
+            if not self._conn.execute("SELECT 1 FROM trades WHERE id = ?", (trade_id,)).fetchone():
+                raise TradingError("없는 거래에는 메모를 남길 수 없습니다.")
+            if note:
+                self._conn.execute(
+                    "INSERT INTO trade_notes (trade_id, note, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(trade_id) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at",
+                    (trade_id, note, datetime.now().isoformat(timespec="seconds")),
+                )
+            else:
+                self._conn.execute("DELETE FROM trade_notes WHERE trade_id = ?", (trade_id,))
+        return note
+
+    @_locked
+    def notes(self) -> dict[int, str]:
+        """거래 번호 → 메모. 손상된 값(글자가 아님)은 빼고 돌려준다."""
+        rows = self._conn.execute("SELECT trade_id, note FROM trade_notes").fetchall()
+        return {row["trade_id"]: row["note"] for row in rows if isinstance(row["note"], str)}
 
     @_locked
     def trades(self) -> list[Trade]:
