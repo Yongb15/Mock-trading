@@ -954,3 +954,16 @@ def test_trade_amounts_are_not_cut_off_by_long_notes(window, app, monkeypatch):
         item = table.item(0, column)
         assert table.columnWidth(column) >= table.fontMetrics().horizontalAdvance(item.text())
     assert table.horizontalHeader().sectionResizeMode(8) == QHeaderView.Stretch
+
+
+def test_note_dialog_keeps_external_name_out_of_the_label(window, app, monkeypatch):
+    """수정 창의 안내 라벨은 HTML로 해석될 수 있어, 외부에서 온 종목명은 창 제목에만 넣는다."""
+    import mock_trading.ui.main_window as mw
+
+    _buy_with_note(window, app, "", monkeypatch)
+    seen = []
+    monkeypatch.setattr(mw.QInputDialog, "getText",
+                        staticmethod(lambda parent, title, label, *a, **k: (seen.append((title, label)), ("", False))[1]))
+    window._edit_note(0)
+    [(title, label)] = seen
+    assert "005930" in title and "005930" not in label and "Samsung" not in label

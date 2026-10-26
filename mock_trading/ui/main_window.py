@@ -383,8 +383,9 @@ class MainWindow(QMainWindow):
         trade_id = int(first.data(Qt.UserRole))
         name = self.trades_table.item(row, 2).text()
         current = self.trades_table.item(row, 8).text() if self.trades_table.item(row, 8) else ""
+        # 안내 라벨은 HTML처럼 보이면 서식으로 그리므로(AutoText) 외부에서 온 종목명은 창 제목(평문)에만 넣는다
         text, ok = QInputDialog.getText(
-            self, "매매 메모", f"{name}\n메모 ({MAX_NOTE_LENGTH}자까지, 비우면 지워요)", QLineEdit.Normal, current
+            self, f"매매 메모 — {name}", f"메모 ({MAX_NOTE_LENGTH}자까지, 비우면 지워요)", QLineEdit.Normal, current
         )
         if not ok:
             return
